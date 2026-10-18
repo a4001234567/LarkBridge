@@ -1,0 +1,29 @@
+{
+  "name": "lark-session-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "npm run build && tsx --test test/*.test.ts",
+    "start": "tsx src/index.ts",
+    "broker": "tsx src/broker.ts"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.59.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0"
+  },
+  "overrides": {
+    "axios": "^1.20.0"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.*
+.lark-bridge.json
+config.local.json
+credentials*.json
+tokens.json
+*.sqlite*
+*.sock
+*.log
+*.pid
