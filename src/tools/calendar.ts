@@ -22,8 +22,12 @@ function getUtcOffsetHours(tz: string): number {
   return (new Date(tzStr).getTime() - new Date(utcStr).getTime()) / 3_600_000;
 }
 
-function parseTime(input: string, tz: string): { sec: number; is_all_day: boolean } {
+export function parseTime(input: string, tz: string): { sec: number; is_all_day: boolean } {
   const s = input.trim();
+  // An explicit ISO offset already identifies an instant; do not reinterpret it
+  // in the configured local timezone (the default list range uses ISO UTC).
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s))
+    return { sec: Math.floor(new Date(s).getTime() / 1000), is_all_day: false };
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const offsetH = getUtcOffsetHours(tz);
     return { sec: (new Date(s).getTime() / 1000) - offsetH * 3600, is_all_day: true };
@@ -31,7 +35,7 @@ function parseTime(input: string, tz: string): { sec: number; is_all_day: boolea
   const match = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
   if (match) {
     const offsetH = getUtcOffsetHours(tz);
-    const ms = new Date(`${match[1]}T${match[2]}:00`).getTime() - offsetH * 3_600_000;
+    const ms = new Date(`${match[1]}T${match[2]}:00Z`).getTime() - offsetH * 3_600_000;
     return { sec: Math.floor(ms / 1000), is_all_day: false };
   }
   return { sec: Math.floor(new Date(s).getTime() / 1000), is_all_day: false };
@@ -324,11 +328,11 @@ export function registerCalendarTools(server: McpServer) {
       let startTime = p.start_time;
       let endTime   = p.end_time;
       let usedDefault = false;
-      if (!startTime && !endTime) {
+      if (!startTime || !endTime) {
         const range = defaultListRange();
-        startTime   = new Date(range.startSec * 1000).toISOString();
-        endTime     = new Date(range.endSec   * 1000).toISOString();
-        usedDefault = true;
+        startTime ??= new Date(range.startSec * 1000).toISOString();
+        endTime ??= new Date(range.endSec * 1000).toISOString();
+        usedDefault = !p.start_time && !p.end_time;
       }
 
       const calId = await getPrimaryCalId();

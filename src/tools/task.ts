@@ -20,8 +20,10 @@ function getUtcOffsetHours(tz: string): number {
   return (new Date(tzStr).getTime() - new Date(utcStr).getTime()) / 3_600_000;
 }
 
-function parseTimeMs(input: string, tz: string): { ms: number; is_all_day: boolean } {
+export function parseTimeMs(input: string, tz: string): { ms: number; is_all_day: boolean } {
   const s = input.trim();
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s))
+    return { ms: new Date(s).getTime(), is_all_day: false };
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const offsetH = getUtcOffsetHours(tz);
     return { ms: new Date(s).getTime() - offsetH * 3_600_000, is_all_day: true };
@@ -29,7 +31,7 @@ function parseTimeMs(input: string, tz: string): { ms: number; is_all_day: boole
   const match = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
   if (match) {
     const offsetH = getUtcOffsetHours(tz);
-    return { ms: new Date(`${match[1]}T${match[2]}:00`).getTime() - offsetH * 3_600_000, is_all_day: false };
+    return { ms: new Date(`${match[1]}T${match[2]}:00Z`).getTime() - offsetH * 3_600_000, is_all_day: false };
   }
   return { ms: new Date(s).getTime(), is_all_day: false };
 }
