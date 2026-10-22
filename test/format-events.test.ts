@@ -98,3 +98,21 @@ test("mentions and attachment types retain the details needed to act", () => {
   assert.match(result, /\[card "Approve\?" \| "Review the report" message_id=om_card\]/);
   assert.match(result, /\[forwarded chat history message_id=om_forward\]/);
 });
+
+test("interactive cards prefer the original user_dsl over Lark's fallback text", () => {
+  const dsl = {
+    schema: "2.0",
+    header: { title: { tag: "plain_text", content: "Release notes" } },
+    body: { elements: [{ tag: "div", text: { tag: "lark_md", content: "A short update" } }] },
+  };
+  const result = formatEvents([{
+    ...base, id: "card-event", type: "im.message.receive_v1",
+    payload: { event: {
+      sender: { sender_id: { open_id: "ou_user" } },
+      message: { message_id: "om_card", chat_id: "oc_chat", message_type: "interactive",
+        content: JSON.stringify({ title: "Release notes", elements: [[{ tag: "text", text: "请升级至最新版本客户端，以查看内容" }]], user_dsl: JSON.stringify(dsl) }) },
+    } },
+  }]);
+  assert.match(result, /\[card "Release notes" \| "A short update" message_id=om_card\]/);
+  assert.doesNotMatch(result, /请升级至最新版本客户端/);
+});
