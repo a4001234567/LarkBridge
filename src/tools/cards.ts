@@ -11,6 +11,23 @@ import {
 } from "../cards/interactive.js";
 import { buildProgressCard } from "../cards/progress.js";
 import type { Interaction } from "../store.js";
+import { formatEvents } from "../format-events.js";
+import { expandForwardedEvents } from "../enrich-events.js";
+
+async function progressMessages(sessionId: string | undefined) {
+  if (!sessionId) return {};
+  const bridge = getBridge();
+  const events = await bridge.call("drain_for", {
+    session_id: sessionId, limit: 100, consumer: "progress",
+  });
+  if (!events.length) return {};
+  const shown = await expandForwardedEvents(events,
+    messageId => getLarkClient().im.message.get({ path: { message_id: messageId } }));
+  const lark_messages = `Lark (reply via Lark tools):\n${formatEvents(shown)}`;
+  for (const event of events)
+    await bridge.call("ack_for", { session_id: sessionId, id: event.id, receipt: event.receipt });
+  return { lark_messages };
+}
 
 export function correlate(card: any, id: string): any {
   if (Array.isArray(card)) return card.map((x) => correlate(x, id));
@@ -202,9 +219,10 @@ export function registerCardTools(server: McpServer) {
   );
   server.tool(
     "feishu_im_patch_progress",
-    "Update a progress card. Reports a Stop click before updating; clicks still route through the chat assignment.",
+    "Update a progress card. Reports a Stop click before updating; clicks still route through the chat assignment. Optionally drain the current Codex session's ready Lark messages.",
     {
       message_id: z.string(),
+      session_id: z.string().optional().describe("Codex thread ID to check for a ready Lark message batch"),
       current_step: z.number().int().min(0),
       step_updates: z
         .array(z.object({ index: z.number().int().min(0), detail: z.string() }))
@@ -222,6 +240,7 @@ export function registerCardTools(server: McpServer) {
           return {
             message_id: args.message_id,
             result: "User asked to stop — abort the task.",
+            ...await progressMessages(args.session_id),
           };
         if (state.status !== "active")
           throw new Error("Progress card expired or cancelled");
@@ -244,6 +263,7 @@ export function registerCardTools(server: McpServer) {
             args.current_step >= state.data.steps.length
               ? "Task complete."
               : "Updated.",
+          ...await progressMessages(args.session_id),
         };
       }),
   );

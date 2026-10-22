@@ -76,6 +76,8 @@ export class Store {
         "UPDATE events SET lease_until=0,lease_token=NULL,lease_session=NULL WHERE lease_session=? AND acked=0",
       )
       .run(id);
+    // Hook clients are short-lived and never own chat subscriptions.
+    this.db.prepare("DELETE FROM sessions WHERE id=? AND harness='hook'").run(id);
   }
   route(chat: string, session: string) {
     const current = this.subscription(session);
@@ -399,7 +401,7 @@ export class Store {
     if (interaction) params.push(interaction, card?.message ?? null);
     return this.db
       .prepare(
-        `SELECT e.id,e.chat AS chat_id,e.type,c.type AS chat_type,c.peer AS peer_id
+        `SELECT e.id,e.chat AS chat_id,e.type,e.received,c.type AS chat_type,c.peer AS peer_id
          FROM events e JOIN sessions s ON s.id=?
          LEFT JOIN subscriptions sub ON sub.session=s.id LEFT JOIN chats c ON c.chat=e.chat
          WHERE e.acked=0 AND s.paused=0 AND s.live=1 AND e.lease_until<=?

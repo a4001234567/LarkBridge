@@ -38,15 +38,19 @@ a new MCP process alone does not subscribe that Codex thread to a chat.
 1. The broker receives a configured Lark event type and keeps its original
    envelope. It requires an originating chat ID and deduplicates by event ID.
 2. SQLite WAL persists the event, route, and delivery state before agent work.
-3. The assigned adapter gets a notice. For Codex, it waits until five seconds
-   pass without a new event, or flushes immediately at six pending events.
-4. The adapter formats a compact batch and calls `codex queue --thread`.
-   After Codex accepts the queue request, the adapter acknowledges the events.
-   The agent never handles a delivery receipt.
+3. The broker releases a session's batch when it contains at least six events
+   or the latest event arrived at least five seconds ago. A drain request does
+   not start or extend this clock. An empty queue returns immediately.
+4. During an active Codex turn, project hooks drain a ready batch after a tool
+   call or before the turn stops. While idle, the adapter drains and submits
+   the batch with `codex queue --thread`. A progress-card update can optionally
+   drain for an explicit session ID. Claims prevent two consumers from taking
+   the same event, and receipts stay inside the bridge.
 
-`codex queue` accepts the batch even while that thread is working. Codex runs
-the queued message after its current turn; queuing it does not insert it into
-the model request immediately following a tool call.
+The idle adapter does not claim events while hooks mark the session active.
+`PostToolUse` supplies its batch as model-visible hook context for the next
+model step. `Stop` continues the turn with a batch if one is ready; otherwise
+it marks the session idle. The adapter remains the wake-up path for idle turns.
 
 Claims have a lease and delivery is **at least once**. A failed queue operation
 leaves the event eligible for retry. An agent should account for possible

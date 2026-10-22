@@ -18,7 +18,7 @@ test('mediator queues event content and acknowledges only after delivery succeed
   class FakeBridge extends EventEmitter {
     async call(method: string, args: any): Promise<any> {
       assert.equal(args.session_id, 'thread-id');
-      if (method === 'fetch_for') return acknowledged.length ? [] : [event];
+      if (method === 'drain_for') return acknowledged.length ? [] : [event];
       if (method === 'ack_for') { acknowledged.push(args.id); return {}; }
       throw new Error(`Unexpected ${method}`);
     }
@@ -29,12 +29,12 @@ test('mediator queues event content and acknowledges only after delivery succeed
     assert.equal(thread, 'thread-id');
     if (failures-- > 0) throw new Error('not connected');
     sent.push(message);
-  }, undefined, { quietMs: 10, maxPending: 6 });
+  });
   bridge.emit('notice', { events: [event] });
-  await wait(20);
+  await tick();
   assert.deepEqual(acknowledged, []);
   bridge.emit('notice', { events: [event] });
-  await wait(20);
+  await tick();
   assert.deepEqual(acknowledged, ['event-1']);
   assert.equal(sent.length, 1);
   assert.match(sent[0], /^Lark \(reply via Lark tools\):\nuser: ou_user\n  2026-10-17 14:00  "hello"$/);
@@ -53,14 +53,13 @@ test('six pending messages flush together without waiting for the quiet timer', 
   }));
   class FakeBridge extends EventEmitter {
     async call(method: string, args: any): Promise<any> {
-      if (method === 'fetch_for') return events.filter(event => !acknowledged.includes(event.id));
+      if (method === 'drain_for') return events.filter(event => !acknowledged.includes(event.id));
       if (method === 'ack_for') { acknowledged.push(args.id); return {}; }
       throw new Error(`Unexpected ${method}`);
     }
   }
   const bridge = new FakeBridge();
-  new CodexNotifier('thread-id', bridge, async (_thread, message) => { sent.push(message); }, undefined,
-    { quietMs: 5000, maxPending: 6 });
+  new CodexNotifier('thread-id', bridge, async (_thread, message) => { sent.push(message); });
   bridge.emit('notice', { events });
   await tick();
   assert.equal(sent.length, 1);
@@ -70,25 +69,26 @@ test('six pending messages flush together without waiting for the quiet timer', 
   assert.match(sent[0], /"message 5"/);
 });
 
-test('repeated notices do not extend the quiet window', async () => {
+test('repeated notices do not duplicate a batch while broker drain is in flight', async () => {
   const event = { id: 'same', chat_id: 'oc_group', type: 'im.message.receive_v1',
     received_at: Date.now(), receipt: 'lease', payload: { event: {
       sender: { sender_id: { open_id: 'ou_user' } },
       message: { chat_id: 'oc_group', message_type: 'text', content: '{"text":"one"}' },
     } } };
-  let delivered = false;
+  let delivered = false, sends = 0;
   class FakeBridge extends EventEmitter {
     async call(method: string): Promise<any> {
-      if (method === 'fetch_for') return delivered ? [] : [event];
+      if (method === 'drain_for') { await wait(30); return delivered ? [] : [event]; }
       if (method === 'ack_for') { delivered = true; return {}; }
       throw new Error(`Unexpected ${method}`);
     }
   }
   const bridge = new FakeBridge();
-  new CodexNotifier('thread-id', bridge, async () => {}, undefined, { quietMs: 40, maxPending: 6 });
+  new CodexNotifier('thread-id', bridge, async () => { sends++; });
   bridge.emit('notice', { events: [event] });
-  await wait(25);
+  await wait(10);
   bridge.emit('notice', { events: [event] });
-  await wait(25);
+  await wait(40);
   assert.equal(delivered, true);
+  assert.equal(sends, 1);
 });

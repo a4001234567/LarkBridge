@@ -23,6 +23,15 @@
           }
         ]
       }
-    ]
+    ],
+    "UserPromptSubmit": [{
+      "hooks": [{ "type": "command", "command": "node \"$(git rev-parse --show-toplevel)/scripts/codex-delivery-hook.mjs\" start", "timeout": 10 }]
+    }],
+    "PostToolUse": [{
+      "hooks": [{ "type": "command", "command": "node \"$(git rev-parse --show-toplevel)/scripts/codex-delivery-hook.mjs\" after-tool", "timeout": 45 }]
+    }],
+    "Stop": [{
+      "hooks": [{ "type": "command", "command": "node \"$(git rev-parse --show-toplevel)/scripts/codex-delivery-hook.mjs\" stop", "timeout": 45 }]
+    }]
   }
 }

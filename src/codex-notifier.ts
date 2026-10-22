@@ -26,14 +26,12 @@ export function queueThroughCodex(thread: string, message: string): Promise<void
 export class CodexNotifier {
   private active = false;
   private seen = new Set<string>();
-  private timer?: ReturnType<typeof setTimeout>;
   private flushAfterCurrent = false;
   constructor(
     readonly thread: string,
     readonly bridge: Pick<Bridge, 'on' | 'call'>,
     readonly queue: QueueMessage = queueThroughCodex,
     readonly enrich: (events: ClaimedEvent[]) => Promise<ClaimedEvent[]> = async events => events,
-    readonly batching: { quietMs: number; maxPending: number } = { quietMs: 5000, maxPending: 6 },
   ) {
     bridge.on('notice', notice => this.receive(notice.events ?? []));
   }
@@ -41,27 +39,15 @@ export class CodexNotifier {
     const current = new Set(events.map(event => event.id));
     const fresh = events.some(event => !this.seen.has(event.id));
     this.seen = current;
-    if (!current.size) {
-      clearTimeout(this.timer);
-      this.timer = undefined;
-    } else if (fresh) this.schedule(current.size >= this.batching.maxPending ? 0 : this.batching.quietMs);
-  }
-  private schedule(delay: number) {
-    clearTimeout(this.timer);
-    this.timer = undefined;
-    if (delay === 0) void this.flush();
-    else {
-      this.timer = setTimeout(() => void this.flush(), delay);
-      this.timer.unref();
-    }
+    if (!current.size) this.seen.clear();
+    else if (fresh) void this.flush();
   }
   private async flush() {
-    this.timer = undefined;
     if (this.active) { this.flushAfterCurrent = true; return; }
     this.active = true;
     let events: ClaimedEvent[] = [];
     try {
-      events = await this.bridge.call('fetch_for', { session_id: this.thread, limit: 100 });
+      events = await this.bridge.call('drain_for', { session_id: this.thread, limit: 100, consumer: 'adapter' });
       if (!events.length) { this.seen.clear(); return; }
       const shown = await this.enrich(events);
       await this.queue(this.thread, `Lark (reply via Lark tools):\n${formatEvents(shown)}`);
@@ -74,7 +60,7 @@ export class CodexNotifier {
       this.active = false;
       if (this.flushAfterCurrent) {
         this.flushAfterCurrent = false;
-        this.schedule(0);
+        void this.flush();
       }
     }
   }

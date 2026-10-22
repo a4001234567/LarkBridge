@@ -135,11 +135,14 @@ The script validates app authentication, waits for the WebSocket to connect, and
 
 ## Codex delivery adapter
 
-`node scripts/codex-adapter.mjs` registers the current Codex thread as a broker session using `LARK_BRIDGE_SESSION_ID`, `CODEX_THREAD_ID`, or `CODEX_SESSION_ID`. Give it the same private Lark config as the broker. Subscribe a chat with `node scripts/bridge-events.mjs assign --session <THREAD_ID> <CHAT_ID>`. The adapter batches new events until five seconds pass without another event, or flushes immediately when six are pending. Repeated broker notices for the same events do not reset the timer. It queues one compact batch to that thread with `codex queue --thread <THREAD_ID>` and acknowledges it after Codex accepts the queue request. The agent does not handle delivery receipts.
+`node scripts/codex-adapter.mjs` registers the current Codex thread as a broker session using `LARK_BRIDGE_SESSION_ID`, `CODEX_THREAD_ID`, or `CODEX_SESSION_ID`. Give it the same private Lark config as the broker. Subscribe a chat with `node scripts/bridge-events.mjs assign --session <THREAD_ID> <CHAT_ID>`. The broker releases each session's pending batch after five seconds without a new event or immediately when six are pending. A drain request does not reset that clock; an empty queue returns immediately. While the session is idle, the adapter queues one compact batch with `codex queue --thread <THREAD_ID>` and acknowledges it after Codex accepts the queue request. The agent does not handle delivery receipts.
 
-The adapter submits the batch even if Codex is in an active turn. Codex processes
-queued messages after that turn; the queue command does not steer the current
-model step. The five-second quiet window is the only bridge-side delay.
+When project hooks are trusted, `UserPromptSubmit` marks the session active.
+`PostToolUse` drains a ready batch into the current turn's next model step;
+`Stop` checks again before ending the turn. The adapter claims events only
+while the session is idle. Set `postToolInjection` to `false` in the private
+Lark config to disable these hooks and keep idle-adapter delivery. A progress
+card update can also drain ready messages when passed `session_id`.
 
 Codex loads the outbound MCP tools from this repository's `.codex/config.toml`.
 
@@ -158,4 +161,4 @@ node scripts/bridge-events.mjs subscribe --session <THREAD_ID> all-except oc_res
 node scripts/bridge-events.mjs subscribe --session <THREAD_ID> only oc_one oc_two
 ```
 
-This repository includes project-scoped `.codex/config.toml` and `.codex/hooks.json`. They load the MCP server and run `SessionStart` (`startup`, `resume`, `clear`, `fork`) and `SessionEnd` hooks only for trusted Codex sessions opened in this repository. Put a private Lark config at `.codex/local-config.json` (or symlink that ignored path to a config elsewhere); `LARK_BRIDGE_CONFIG` still overrides it. The hook reads Codex's `session_id` from its JSON stdin, starts the adapter detached, and stops only its recorded adapter at session end. Codex requires local hooks to be reviewed and trusted through `/hooks` before they run; newly changed hook definitions need review again. Existing sessions may need to restart to load the project configuration.
+This repository includes project-scoped `.codex/config.toml` and `.codex/hooks.json`. They load the MCP server and run `SessionStart` (`startup`, `resume`, `clear`, `fork`), `UserPromptSubmit`, `PostToolUse`, `Stop`, and `SessionEnd` hooks only for trusted Codex sessions opened in this repository. Put a private Lark config at `.codex/local-config.json` (or symlink that ignored path to a config elsewhere); `LARK_BRIDGE_CONFIG` still overrides it. The lifecycle hook reads Codex's `session_id` from its JSON stdin, starts the adapter detached, and stops only its recorded adapter at session end. Codex requires local hooks to be reviewed and trusted through `/hooks` before they run; newly changed hook definitions need review again. Existing sessions may need to restart to load the project configuration.

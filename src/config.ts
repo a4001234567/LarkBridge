@@ -14,6 +14,7 @@ export type Config = {
   continuous: boolean;
   graceMs: number;
   offline: boolean;
+  postToolInjection?: boolean;
 };
 export function config(): Config {
   const local = fileURLToPath(new URL("../.codex/local-config.json", import.meta.url));
@@ -38,5 +39,6 @@ export function config(): Config {
     continuous: saved.continuous === true,
     graceMs: saved.graceMs ?? 60_000,
     offline: process.env.LARK_BRIDGE_OFFLINE === "1",
+    postToolInjection: saved.postToolInjection !== false,
   };
 }

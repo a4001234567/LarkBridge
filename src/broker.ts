@@ -54,6 +54,9 @@ const schemas: Record<string, z.ZodTypeAny> = {
       .default([]),
   }),
   fetch_for: z.object({ session_id: id, limit: z.number().int().min(1).max(100).default(20) }),
+  drain_for: z.object({ session_id: id, limit: z.number().int().min(1).max(100).default(100),
+    consumer: z.enum(["hook", "adapter", "progress"]) }),
+  session_activity: z.object({ session_id: id, active: z.boolean() }),
   ack_for: z.object({ session_id: id, id: id.optional(), receipt: id }),
   raw_for: z.object({ session_id: id, id: id.optional(), receipt: id }),
   status: z.object({}),
@@ -76,6 +79,29 @@ export async function serve(cfg: Config) {
   const store = new Store(cfg.stateDir),
     auth = new Auth(cfg);
   const peers = new Map<string, { socket: Socket; seen: number }>();
+  const activeSessions = new Set<string>();
+  const batchWaiters = new Set<() => void>();
+  const wakeBatchWaiters = () => { for (const wake of batchWaiters) wake(); };
+  const drainReady = async (sessionId: string, limit: number, consumer: string) => {
+    while (!closing) {
+      if (consumer === "adapter" && activeSessions.has(sessionId)) return [];
+      const pending = store.pending(sessionId) as Array<{ received: number }>;
+      if (!pending.length) return [];
+      const latest = Math.max(...pending.map(event => event.received));
+      const remaining = 5000 - (Date.now() - latest);
+      if (pending.length >= 6 || remaining <= 0) {
+        const events = store.claim(sessionId, limit);
+        wakeBatchWaiters();
+        return events;
+      }
+      await new Promise<void>(resolve => {
+        const finish = () => { clearTimeout(timer); batchWaiters.delete(finish); resolve(); };
+        const timer = setTimeout(finish, remaining);
+        batchWaiters.add(finish);
+      });
+    }
+    return [];
+  };
   const authCards = new Map<string, string>();
   let patchingAuthCards = false;
   const patchAuthCards = async () => {
@@ -119,9 +145,9 @@ export async function serve(cfg: Config) {
   };
   const ws = cfg.offline
     ? undefined
-    : startWs(cfg, (raw) => {
+      : startWs(cfg, (raw) => {
         const event = store.ingest(raw);
-        if (!event.duplicate) notify();
+        if (!event.duplicate) { wakeBatchWaiters(); notify(); }
         return event.response;
       });
   const server = createServer((socket) => {
@@ -181,6 +207,13 @@ export async function serve(cfg: Config) {
           return store.raw(session, args.id, args.receipt);
         case "fetch_for":
           return store.claim(args.session_id, args.limit);
+        case "drain_for":
+          return await drainReady(args.session_id, args.limit, args.consumer);
+        case "session_activity":
+          if (args.active) activeSessions.add(args.session_id);
+          else { activeSessions.delete(args.session_id); notify(); }
+          wakeBatchWaiters();
+          return {};
         case "ack_for":
           store.ack(args.session_id, args.id, args.receipt);
           return {};
@@ -282,6 +315,8 @@ export async function serve(cfg: Config) {
       if (!closing && session && peers.get(session)?.socket === socket) {
         peers.delete(session);
         store.disconnect(session);
+        activeSessions.delete(session);
+        wakeBatchWaiters();
         if (!peers.size) emptySince = Date.now();
       }
     });
@@ -311,6 +346,7 @@ export async function serve(cfg: Config) {
     if (closing) return done;
     closing = true;
     clearInterval(timer);
+    wakeBatchWaiters();
     ws?.close();
     await wsLease?.release();
     auth.close();
@@ -327,7 +363,7 @@ export async function serve(cfg: Config) {
     for (const [, peer] of peers)
       if (Date.now() - peer.seen > 45_000) peer.socket.destroy();
     store.expire();
-    store.fireSchedules();
+    if (store.fireSchedules()) wakeBatchWaiters();
     void patchAuthCards();
     notify();
     if (
