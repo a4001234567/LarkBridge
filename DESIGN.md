@@ -8,7 +8,7 @@ agent sessions or make the broker responsible for the agent's replies.
 | Component | Responsibility |
 | --- | --- |
 | Broker | Own the app's one long-lived Lark event connection, token refresh, SQLite event queue, chat subscriptions, session reminders, and immediate card callback responses. |
-| Session adapter | Register a stable agent-session ID and receive broker notices. The Codex adapter queues events for idle turns; project hooks deliver them during active turns. |
+| Session adapter | Register a stable agent-session ID, receive broker notices, and deliver events to that session. The Codex adapter uses `codex queue`. |
 | Stdio MCP server | Give an agent independent message, card, people, calendar, task, document, wiki, and token-proxy tools. It asks the broker for tokens, then calls Lark directly. |
 
 The broker is detached from the session that starts it. A startup `flock` prevents
@@ -38,14 +38,15 @@ a new MCP process alone does not subscribe that Codex thread to a chat.
 1. The broker receives a configured Lark event type and keeps its original
    envelope. It requires an originating chat ID and deduplicates by event ID.
 2. SQLite WAL persists the event, route, and delivery state before agent work.
-3. The assigned adapter gets a notice. For an idle Codex session, it waits until
-   five seconds pass without a new event, or flushes immediately at six pending
-   events. It calls `codex queue --thread` and acknowledges accepted events.
-4. During an active Codex turn, the adapter leaves events in SQLite. A
-   `PostToolUse` hook claims and formats them after the next tool call, adds
-   them to the next model request, and acknowledges delivery. A `Stop` hook
-   continues the turn with events that arrived after its last tool call.
+3. The assigned adapter gets a notice. For Codex, it waits until five seconds
+   pass without a new event, or flushes immediately at six pending events.
+4. The adapter formats a compact batch and calls `codex queue --thread`.
+   After Codex accepts the queue request, the adapter acknowledges the events.
    The agent never handles a delivery receipt.
+
+`codex queue` accepts the batch even while that thread is working. Codex runs
+the queued message after its current turn; queuing it does not insert it into
+the model request immediately following a tool call.
 
 Claims have a lease and delivery is **at least once**. A failed queue operation
 leaves the event eligible for retry. An agent should account for possible

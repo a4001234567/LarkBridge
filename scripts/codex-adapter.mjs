@@ -3,7 +3,6 @@ import { Bridge, setBridge } from '../dist/bridge.js';
 import { CodexNotifier } from '../dist/codex-notifier.js';
 import { getLarkClient } from '../dist/client.js';
 import { expandForwardedEvents } from '../dist/enrich-events.js';
-import { codexTurnActive } from '../dist/codex-activity.js';
 
 const thread = process.env.LARK_BRIDGE_SESSION_ID ?? process.env.CODEX_THREAD_ID ?? process.env.CODEX_SESSION_ID;
 if (!thread) throw new Error('Set LARK_BRIDGE_SESSION_ID or run inside a Codex session');
@@ -16,7 +15,7 @@ setBridge(bridge);
 new CodexNotifier(thread, bridge, undefined, events => expandForwardedEvents(
   events,
   messageId => getLarkClient().im.message.get({ path: { message_id: messageId } }),
-), undefined, () => codexTurnActive(bridge.cfg.stateDir, thread));
+));
 let closing = false;
 async function connect() {
   for (let delay = 250; !closing; delay = Math.min(delay * 2, 5000)) {

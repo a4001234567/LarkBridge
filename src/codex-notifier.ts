@@ -33,8 +33,7 @@ export class CodexNotifier {
     readonly bridge: Pick<Bridge, 'on' | 'call'>,
     readonly queue: QueueMessage = queueThroughCodex,
     readonly enrich: (events: ClaimedEvent[]) => Promise<ClaimedEvent[]> = async events => events,
-    readonly batching: { quietMs: number; maxPending: number; retryMs?: number } = { quietMs: 5000, maxPending: 6 },
-    readonly turnActive: () => boolean = () => false,
+    readonly batching: { quietMs: number; maxPending: number } = { quietMs: 5000, maxPending: 6 },
   ) {
     bridge.on('notice', notice => this.receive(notice.events ?? []));
   }
@@ -59,7 +58,6 @@ export class CodexNotifier {
   private async flush() {
     this.timer = undefined;
     if (this.active) { this.flushAfterCurrent = true; return; }
-    if (this.turnActive()) { this.schedule(this.batching.retryMs ?? 5000); return; }
     this.active = true;
     let events: ClaimedEvent[] = [];
     try {
