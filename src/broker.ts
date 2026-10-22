@@ -17,6 +17,11 @@ const schemas: Record<string, z.ZodTypeAny> = {
   heartbeat: z.object({}),
   sessions: z.object({}),
   route: z.object({ chat_id: chat, session_id: id }),
+  subscribe: z.object({
+    session_id: id,
+    mode: z.enum(["all", "all_except", "only"]),
+    chats: z.array(chat).default([]),
+  }),
   resolve_chat: z.object({ peer_id: z.string().startsWith("ou_").max(512) }),
   pause: z.object({ paused: z.boolean() }),
   fetch: z.object({
@@ -106,8 +111,8 @@ export async function serve(cfg: Config) {
           throw new Error("Session ID already connected");
         session = args.session_id;
         peers.set(session!, { socket, seen: Date.now() });
-        store.register(session!, args.name, args.harness);
-        return { session_id: session };
+        const registration = store.register(session!, args.name, args.harness);
+        return { session_id: session, ...registration };
       }
       if (!session) throw new Error("Register this session first");
       peers.get(session)!.seen = Date.now();
@@ -123,6 +128,11 @@ export async function serve(cfg: Config) {
           store.route(args.chat_id, args.session_id);
           notify();
           return {};
+        case "subscribe": {
+          const result = store.subscribe(args.session_id, args.mode, args.chats);
+          notify();
+          return result;
+        }
         case "resolve_chat":
           return { chat_id: store.chatForPeer(args.peer_id) };
         case "pause":

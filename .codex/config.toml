@@ -1,0 +1,4 @@
+[mcp_servers.lark_bridge]
+command = "bash"
+args = ["-c", "exec node \"$(git rev-parse --show-toplevel)/dist/index.js\""]
+startup_timeout_sec = 20

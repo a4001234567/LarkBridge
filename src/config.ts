@@ -1,7 +1,8 @@
-import { readFileSync, mkdirSync, chmodSync } from "node:fs";
+import { readFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 export type Config = {
   appId: string;
@@ -15,7 +16,8 @@ export type Config = {
   offline: boolean;
 };
 export function config(): Config {
-  const file = process.env.LARK_BRIDGE_CONFIG;
+  const local = fileURLToPath(new URL("../.codex/local-config.json", import.meta.url));
+  const file = process.env.LARK_BRIDGE_CONFIG ?? (existsSync(local) ? local : undefined);
   const saved = file ? JSON.parse(readFileSync(file, "utf8")) : {};
   const appId = process.env.LARK_APP_ID ?? saved.appId;
   if (!appId) throw new Error("Set LARK_APP_ID or LARK_BRIDGE_CONFIG");

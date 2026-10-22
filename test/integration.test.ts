@@ -49,6 +49,8 @@ test("Unix socket RPC registers sessions, routes, claims, acknowledges and rejec
   const events = await a.call("fetch");
   assert.equal(events[0].payload.event.message.content, "你好");
   assert.deepEqual(await b.call("fetch"), []);
+  await assert.rejects(b.call("route", { chat_id: "oc_chat", session_id: "b" }), /held by live session a/);
+  await a.call("subscribe", { session_id: "a", mode: "only", chats: [] });
   await b.call("route", { chat_id: "oc_chat", session_id: "b" });
   await assert.rejects(
     a.call("ack", { id: events[0].id, receipt: events[0].receipt }),
@@ -58,6 +60,7 @@ test("Unix socket RPC registers sessions, routes, claims, acknowledges and rejec
   await b.call("ack", { receipt: event.receipt });
   assert.deepEqual(await b.call("fetch"), []);
   assert.equal((await a.call("sessions")).sessions.length, 2);
+  await b.call("subscribe", { session_id: "b", mode: "only", chats: [] });
   await b.call('route',{chat_id:'oc_chat',session_id:'a'});
   broker.store.ingest({...message,header:{...message.header,event_id:'delegated'}});
   const [delegated]=await b.call('fetch_for',{session_id:'a',limit:1});
@@ -178,6 +181,7 @@ test(
       "feishu_im_send_progress",
       "feishu_im_patch_progress",
       "feishu_bridge_events",
+      "feishu_bridge_subscribe",
     ])
       assert.ok(tools.tools.some((x) => x.name === name));
     await a.close();

@@ -44,7 +44,7 @@ function setup(t: any) {
   };
 }
 
-test("chat-only routing, reassignment invalidates old receipts, dedupe survives restart", (t) => {
+test("chat-only routing, released claims invalidate old receipts, dedupe survives restart", (t) => {
   const fixture = setup(t);
   let { s } = fixture;
   s.register("a", "A", "mcp");
@@ -56,6 +56,8 @@ test("chat-only routing, reassignment invalidates old receipts, dedupe survives 
   const first = s.claim("a");
   assert.equal(first.length, 2);
   assert.equal(s.claim("b").length, 0);
+  assert.throws(() => s.route("oc_one", "b"), /held by live session a/);
+  s.subscribe("a", "only", []);
   s.route("oc_one", "b");
   assert.throws(() => s.ack("a", first[0].id, first[0].receipt));
   const second = s.claim("b");
@@ -67,6 +69,53 @@ test("chat-only routing, reassignment invalidates old receipts, dedupe survives 
   assert.equal(s.claim("b").length, 1);
   s.route("oc_two", "b");
   assert.equal(s.claim("b").length, 1);
+});
+test("all and all-except filters include every event type and partition chats", (t) => {
+  const { s } = setup(t);
+  s.register("a", "A", "mcp");
+  s.register("b", "B", "mcp");
+  s.subscribe("a", "all_except", ["oc_private"]);
+  s.subscribe("b", "only", ["oc_private"]);
+  assert.throws(() => s.route("oc_one", "b"), /held by live session a/);
+  s.ingest(message("ordinary", "oc_one"));
+  s.ingest(message("future", "oc_new", "custom.future.event"));
+  s.ingest(message("private", "oc_private"));
+  s.ingest(click("card", "oc_one"));
+  assert.deepEqual(s.claim("a").map(event => event.id), ["ordinary", "future", "card"]);
+  assert.deepEqual(s.claim("b").map(event => event.id), ["private"]);
+  assert.throws(() => s.subscribe("a", "all", []), /held by live session b/);
+  s.subscribe("b", "only", []);
+  s.subscribe("a", "all", []);
+  assert.deepEqual(s.claim("a").map(event => event.id), ["private"]);
+});
+test("only filters are exclusive while live and released when a session disconnects", (t) => {
+  const { s } = setup(t);
+  s.register("a", "A", "mcp");
+  s.register("b", "B", "mcp");
+  s.subscribe("a", "only", ["oc_one", "oc_two"]);
+  s.subscribe("b", "only", ["oc_three"]);
+  assert.throws(() => s.subscribe("b", "only", ["oc_two"]), /held by live session a/);
+  s.ingest(message("one", "oc_one"));
+  const [leased] = s.claim("a");
+  s.disconnect("a");
+  s.subscribe("b", "only", ["oc_one", "oc_three"]);
+  assert.throws(() => s.ack("a", leased.id, leased.receipt), /reassigned/);
+  assert.equal(s.claim("b")[0].id, "one");
+  s.register("a", "A", "mcp");
+  assert.deepEqual(s.list().subscriptions.find((item: any) => item.session === "a")?.chats, ["oc_two"]);
+});
+test("a broad filter does not reclaim chats held when its session reconnects", (t) => {
+  const { s } = setup(t);
+  s.register("a", "A", "mcp");
+  s.subscribe("a", "all", []);
+  s.disconnect("a");
+  s.register("b", "B", "mcp");
+  s.subscribe("b", "only", ["oc_one"]);
+  assert.equal(s.register("a", "A", "mcp").subscription_dropped, true);
+  s.ingest(message("one", "oc_one"));
+  assert.deepEqual(s.claim("a"), []);
+  assert.equal(s.claim("b")[0].id, "one");
+  assert.equal(s.list().subscriptions.some((item: any) => item.session === "a"), false);
 });
 test("pause, disconnect and expired leases retain events", (t) => {
   const { s } = setup(t);

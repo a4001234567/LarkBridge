@@ -1,0 +1,28 @@
+{
+  "description": "Attach Codex sessions opened in this project to Lark Bridge.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear|fork)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/codex-hook.mjs\" start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/codex-hook.mjs\" end",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

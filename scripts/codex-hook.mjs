@@ -36,3 +36,9 @@ if (action === 'end') {
   closeSync(log);
   writeFileSync(pidFile, `${child.pid}\n`, { mode: 0o600 });
 }
+if (action === 'start') console.log(JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: 'SessionStart',
+    additionalContext: `This Codex thread's Lark Bridge session ID is ${thread}. To receive a Lark chat, use feishu_bridge_subscribe or feishu_bridge_assign with this session ID. The broker rejects chats already held by another live session.`,
+  },
+}));

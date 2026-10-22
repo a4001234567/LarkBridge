@@ -7,7 +7,7 @@ agent sessions or make the broker responsible for the agent's replies.
 
 | Component | Responsibility |
 | --- | --- |
-| Broker | Own the app's one long-lived Lark event connection, token refresh, SQLite event queue, chat routes, and immediate card callback responses. |
+| Broker | Own the app's one long-lived Lark event connection, token refresh, SQLite event queue, chat subscriptions, and immediate card callback responses. |
 | Session adapter | Register a stable agent-session ID, receive broker notices, and deliver events to that session. The Codex adapter uses `codex queue`. |
 | Stdio MCP server | Give an agent independent tools to send and reply to messages, read context, upload resources, and create or update cards. It asks the broker for tokens, then calls Lark directly. |
 
@@ -19,13 +19,14 @@ one broker through a private Unix socket.
 
 ## Listening and routing
 
-An agent session "listens" to a chat by assigning its **chat ID** to its stable
-session ID. This is a persisted `chat_id -> session_id` route, not another Lark
-connection. A chat has one assigned session at a time. Messages and card actions
-both use the chat ID in their Lark payload as the routing key; a card's
-registration never chooses the destination. Reassigning a chat moves its
-unprocessed events and invalidates outstanding delivery receipts. Events for an
-unassigned or offline session remain buffered.
+An agent session "listens" through a persisted filter on **chat IDs**, not
+another Lark connection. The filter may match every chat, every chat except a
+listed set, or only a listed set. Filters of live sessions must be disjoint; a
+live owner must release a chat before another live session can take it. Offline
+sessions do not block a new claim. Messages and card actions both use the chat
+ID in their Lark payload as the routing key; a card's registration never chooses
+the destination. Changing ownership invalidates outstanding delivery receipts.
+Events for an unassigned or offline session remain buffered.
 
 Codex does not reliably provide its thread ID to a newly started stdio MCP
 process. The Codex hook or adapter therefore binds the actual thread ID

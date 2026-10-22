@@ -6,6 +6,7 @@ dist/
 config.local.json
 credentials*.json
 tokens.json
+.codex/local-config.json
 *.sqlite*
 *.sock
 *.log

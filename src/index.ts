@@ -33,9 +33,19 @@ server.tool(
 );
 server.tool(
   "feishu_bridge_assign",
-  "Assign or transfer a chat to an existing session. Pending events follow the new assignment.",
+  "Subscribe a live session to one chat. A chat held by another live session cannot be taken; have that session exclude or release it first.",
   { chat_id: z.string().startsWith("oc_"), session_id: z.string() },
   (args) => withAuth(() => bridge.call("route", args)),
+);
+server.tool(
+  "feishu_bridge_subscribe",
+  "Replace a live session's chat filter: all chats, all except listed chats, or only listed chats. Overlap with another live session is rejected. Pass only with an empty list to release all chats.",
+  {
+    session_id: z.string(),
+    mode: z.enum(["all", "all_except", "only"]),
+    chats: z.array(z.string().startsWith("oc_")).default([]),
+  },
+  (args) => withAuth(() => bridge.call("subscribe", args)),
 );
 server.tool(
   "feishu_bridge_pause",

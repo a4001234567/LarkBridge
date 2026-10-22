@@ -7,6 +7,7 @@ import {
   type CardEntry,
 } from "./cards/interactive.js";
 import { buildProgressCard } from "./cards/progress.js";
+import { matches, overlaps, type Subscription, type SubscriptionMode } from "./subscriptions.js";
 
 export type Interaction = {
   id: string;
@@ -25,9 +26,12 @@ export class Store {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, name TEXT, harness TEXT, live INTEGER DEFAULT 0, paused INTEGER DEFAULT 0, seen INTEGER);
       CREATE TABLE IF NOT EXISTS routes(chat TEXT PRIMARY KEY, session TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS subscriptions(session TEXT PRIMARY KEY, mode TEXT NOT NULL, chats TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS chats(chat TEXT PRIMARY KEY, type TEXT, peer TEXT);
       CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, chat TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, received INTEGER NOT NULL, acked INTEGER DEFAULT 0, lease_session TEXT, lease_token TEXT, lease_until INTEGER DEFAULT 0, response TEXT);
       CREATE TABLE IF NOT EXISTS interactions(id TEXT PRIMARY KEY, chat TEXT NOT NULL, message TEXT UNIQUE, expires INTEGER NOT NULL, state TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');`);
+    this.db.exec(`INSERT OR IGNORE INTO subscriptions(session,mode,chats)
+      SELECT session,'only',json_group_array(chat) FROM routes GROUP BY session`);
     this.db.exec(`INSERT OR IGNORE INTO chats(chat,type,peer)
       SELECT e.chat,
         COALESCE(json_extract(e.payload,'$.event.message.chat_type'),json_extract(e.payload,'$.message.chat_type')),
@@ -43,11 +47,18 @@ export class Store {
     );
   }
   register(id: string, name: string, harness: string) {
+    const saved = this.subscription(id);
+    const conflict = saved && this.liveSubscriptions(id).some(other => overlaps(saved, other));
+    if (conflict) {
+      this.db.prepare("DELETE FROM subscriptions WHERE session=?").run(id);
+      this.db.prepare("DELETE FROM routes WHERE session=?").run(id);
+    }
     this.db
       .prepare(
         "INSERT INTO sessions(id,name,harness,live,seen) VALUES(?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,harness=excluded.harness,live=1,seen=excluded.seen",
       )
       .run(id, name, harness, Date.now());
+    return { subscription_dropped: !!conflict };
   }
   disconnect(id: string) {
     this.db.prepare("UPDATE sessions SET live=0 WHERE id=?").run(id);
@@ -58,18 +69,69 @@ export class Store {
       .run(id);
   }
   route(chat: string, session: string) {
-    if (!this.db.prepare("SELECT id FROM sessions WHERE id=?").get(session))
-      throw new Error("Unknown destination session");
-    this.db
-      .prepare(
-        "INSERT INTO routes VALUES(?,?) ON CONFLICT(chat) DO UPDATE SET session=excluded.session",
-      )
-      .run(chat, session);
-    this.db
-      .prepare(
-        "UPDATE events SET lease_until=0,lease_token=NULL,lease_session=NULL WHERE chat=? AND acked=0",
-      )
-      .run(chat);
+    const current = this.subscription(session);
+    if (current?.mode === "all") return this.subscribe(session, "all", []);
+    if (current?.mode === "all_except")
+      return this.subscribe(session, "all_except", current.chats.filter(value => value !== chat));
+    return this.subscribe(session, "only", [...(current?.chats ?? []), chat]);
+  }
+  private subscription(session: string): Subscription | undefined {
+    const row = this.db.prepare("SELECT session,mode,chats FROM subscriptions WHERE session=?")
+      .get(session) as { session: string; mode: SubscriptionMode; chats: string } | undefined;
+    return row && { session: row.session, mode: row.mode, chats: JSON.parse(row.chats) };
+  }
+  private liveSubscriptions(except?: string): Subscription[] {
+    const rows = this.db.prepare(`SELECT sub.session,sub.mode,sub.chats FROM subscriptions sub
+      JOIN sessions s ON s.id=sub.session WHERE s.live=1 AND sub.session<>?`)
+      .all(except ?? "") as Array<{ session: string; mode: SubscriptionMode; chats: string }>;
+    return rows.map(row => ({ session: row.session, mode: row.mode, chats: JSON.parse(row.chats) }));
+  }
+  private owner(chat: string): string | undefined {
+    return this.liveSubscriptions().find(sub => matches(sub, chat))?.session;
+  }
+  subscribe(session: string, mode: SubscriptionMode, chats: string[] = []) {
+    const target = this.db.prepare("SELECT live FROM sessions WHERE id=?")
+      .get(session) as { live: number } | undefined;
+    if (!target) throw new Error("Unknown destination session");
+    if (!target.live) throw new Error("Destination session is not live");
+    const normalized = [...new Set(chats)];
+    if (normalized.some(chat => !chat.startsWith("oc_"))) throw new Error("Invalid chat ID");
+    if (mode === "all" && normalized.length) throw new Error("All-chats filter must have no chat list");
+    const next: Subscription = { session, mode, chats: normalized };
+    const conflict = this.liveSubscriptions(session).find(other => overlaps(next, other));
+    if (conflict) throw new Error(`Chats already held by live session ${conflict.session}`);
+    const eventChats = this.db.prepare("SELECT DISTINCT chat FROM events WHERE acked=0")
+      .all() as Array<{ chat: string }>;
+    const before = new Map(eventChats.map(row => [row.chat, this.owner(row.chat)]));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // A live claim can take chats from an offline explicit subscription.
+      const offline = this.db.prepare(`SELECT sub.session,sub.chats FROM subscriptions sub
+        JOIN sessions s ON s.id=sub.session WHERE s.live=0 AND sub.mode='only'`)
+        .all() as Array<{ session: string; chats: string }>;
+      for (const row of offline) {
+        const retained = (JSON.parse(row.chats) as string[]).filter(chat => !matches(next, chat));
+        this.db.prepare("UPDATE subscriptions SET chats=? WHERE session=?")
+          .run(JSON.stringify(retained), row.session);
+        this.db.prepare("DELETE FROM routes WHERE session=?").run(row.session);
+        for (const chat of retained)
+          this.db.prepare("INSERT OR REPLACE INTO routes(chat,session) VALUES(?,?)").run(chat, row.session);
+      }
+      this.db.prepare(`INSERT INTO subscriptions(session,mode,chats) VALUES(?,?,?)
+        ON CONFLICT(session) DO UPDATE SET mode=excluded.mode,chats=excluded.chats`)
+        .run(session, mode, JSON.stringify(normalized));
+      this.db.prepare("DELETE FROM routes WHERE session=?").run(session);
+      if (mode === "only") for (const chat of normalized)
+        this.db.prepare("INSERT OR REPLACE INTO routes(chat,session) VALUES(?,?)").run(chat, session);
+      for (const row of eventChats) if (before.get(row.chat) !== this.owner(row.chat))
+        this.db.prepare(`UPDATE events SET lease_until=0,lease_token=NULL,lease_session=NULL
+          WHERE chat=? AND acked=0`).run(row.chat);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return next;
   }
   pause(id: string, paused: boolean) {
     this.db.prepare("UPDATE sessions SET paused=? WHERE id=?").run(+paused, id);
@@ -78,6 +140,8 @@ export class Store {
     return {
       sessions: this.db.prepare("SELECT * FROM sessions").all(),
       routes: this.db.prepare("SELECT * FROM routes").all(),
+      subscriptions: this.db.prepare("SELECT session,mode,chats FROM subscriptions").all()
+        .map((row: any) => ({ ...row, chats: JSON.parse(row.chats) })),
     };
   }
   chatForPeer(peer: string): string {
@@ -255,7 +319,14 @@ export class Store {
     if (interaction) params.push(interaction, card?.message ?? null);
     return this.db
       .prepare(
-        `SELECT e.id,e.chat AS chat_id,e.type,c.type AS chat_type,c.peer AS peer_id FROM events e JOIN routes r ON r.chat=e.chat JOIN sessions s ON s.id=r.session LEFT JOIN chats c ON c.chat=e.chat WHERE e.acked=0 AND r.session=? AND s.paused=0 AND s.live=1 AND e.lease_until<=?${filter} ORDER BY e.received LIMIT 100`,
+        `SELECT e.id,e.chat AS chat_id,e.type,c.type AS chat_type,c.peer AS peer_id
+         FROM events e JOIN subscriptions sub ON sub.session=?
+         JOIN sessions s ON s.id=sub.session LEFT JOIN chats c ON c.chat=e.chat
+         WHERE e.acked=0 AND s.paused=0 AND s.live=1 AND e.lease_until<=?
+           AND (sub.mode='all'
+             OR (sub.mode='only' AND EXISTS(SELECT 1 FROM json_each(sub.chats) WHERE value=e.chat))
+             OR (sub.mode='all_except' AND NOT EXISTS(SELECT 1 FROM json_each(sub.chats) WHERE value=e.chat)))
+           ${filter} ORDER BY e.received LIMIT 100`,
       )
       .all(...params);
   }
@@ -281,24 +352,26 @@ export class Store {
   }
   ack(session: string, id: string | undefined, receipt: string) {
     const idFilter = id ? " AND id=?" : "";
-    const result = this.db
-      .prepare(
-        `UPDATE events SET acked=1 WHERE lease_session=? AND lease_token=? AND lease_until>? AND chat IN (SELECT chat FROM routes WHERE session=?)${idFilter}`,
-      )
-      .run(...(id ? [session, receipt, Date.now(), session, id] : [session, receipt, Date.now(), session]));
+    const row = this.db.prepare(`SELECT id,chat FROM events WHERE lease_session=?
+      AND lease_token=? AND lease_until>? AND acked=0${idFilter}`)
+      .get(...(id ? [session, receipt, Date.now(), id] : [session, receipt, Date.now()])) as
+      { id: string; chat: string } | undefined;
+    if (!row || this.owner(row.chat) !== session)
+      throw new Error("Receipt expired or event reassigned");
+    const result = this.db.prepare("UPDATE events SET acked=1 WHERE id=? AND acked=0").run(row.id);
     if (!result.changes) throw new Error("Receipt expired or event reassigned");
   }
   raw(session: string, id: string | undefined, receipt: string) {
-    const idFilter = id ? " AND e.id=?" : "";
+    const idFilter = id ? " AND id=?" : "";
     const row: any = this.db
       .prepare(
-        `SELECT e.id,e.chat AS chat_id,e.type,e.payload,e.received AS received_at
-         FROM events e JOIN routes r ON r.chat=e.chat
-         WHERE e.acked=0 AND e.lease_session=? AND e.lease_token=?
-           AND e.lease_until>? AND r.session=?${idFilter}`,
+        `SELECT id,chat AS chat_id,type,payload,received AS received_at
+         FROM events WHERE acked=0 AND lease_session=? AND lease_token=?
+           AND lease_until>?${idFilter}`,
       )
-      .get(...(id ? [session, receipt, Date.now(), session, id] : [session, receipt, Date.now(), session]));
-    if (!row) throw new Error("Receipt expired or event reassigned");
+      .get(...(id ? [session, receipt, Date.now(), id] : [session, receipt, Date.now()]));
+    if (!row || this.owner(row.chat_id) !== session)
+      throw new Error("Receipt expired or event reassigned");
     return { ...row, payload: JSON.parse(row.payload), receipt };
   }
   close() {

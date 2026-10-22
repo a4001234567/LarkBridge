@@ -6,7 +6,7 @@ A shared inbound broker and a lightweight stdio MCP server for existing agent se
 
 - **Broker:** one process per configured integration, OAuth and tenant tokens, WebSocket events/callbacks, SQLite event buffering, deduplication, chat assignments, delivery receipts, and immediate card responses.
 - **Session MCP server:** registers a stable session identity, receives event notices, exposes retrieval/acknowledgement tools, and makes outbound Lark API calls directly. It obtains access tokens over the local socket; the broker never proxies message API calls.
-- **Routing:** `chat_id → session_id` only. Card registrations provide callback response behavior, never a destination. Chat reassignment also moves unprocessed events and invalidates old receipts.
+- **Routing:** one live session owns each subscribed chat. Filters can include all chats, all except listed chats, or only listed chats. Card registrations provide callback response behavior, never a destination.
 
 ## Run
 
@@ -66,8 +66,8 @@ For fresh authorization, call `feishu_auth_init` with the required scope string.
 
 ## Session operation
 
-1. Call `feishu_bridge_sessions` to see registered sessions.
-2. Call `feishu_bridge_assign` with the chat ID and destination session ID.
+1. Call `feishu_bridge_sessions` to see registered sessions and filters.
+2. Call `feishu_bridge_subscribe` with a live session ID and `mode: "all"`, `"all_except"`, or `"only"`. Pass chat IDs for the latter two. `feishu_bridge_assign` adds one chat to an existing only-list.
 3. A brief MCP logging notification announces available events.
 4. The Codex adapter delivers compact, `feishu_im_watch`-style event content directly to the assigned session and handles acknowledgment after Codex accepts it. The agent only handles the message. Other clients can call `feishu_bridge_events` to retrieve events; that tool handles acknowledgment itself and supports `raw=true` for full Lark payloads.
 
@@ -84,7 +84,9 @@ Group events show the originating `chat: oc_...` once, then one `user: ou_...` b
 
 Text @mentions are rendered with the mentioned name and open ID. Forwarded chat-history (`merge_forward`) messages are expanded from Lark's message lookup; consecutive entries from one sender share a single user label while their original order is preserved. If lookup fails, the compact event still provides its message ID. `feishu_im_get_message` retrieves the full bundle. Audio, files, images and video include their resource keys and message ID for `feishu_im_fetch_resource`; audio transcription is not performed by the bridge. Incoming card messages show a short title, while card clicks show their action and form values. `feishu_im_read` accepts a chat ID, a known p2p user's open ID, or a thread message ID, and returns a `page_token` for further history pages.
 
-`feishu_bridge_pause` pauses this session's retrieval and notices while keeping collection active. Unassigned chats remain buffered until assigned. Socket heartbeats expire after 45 seconds; saved session identities and assignments survive disconnection.
+`feishu_bridge_pause` pauses this session's retrieval and notices while keeping collection active; it does not release the session's chat ownership. Unsubscribed chats remain buffered until a live session subscribes. Socket heartbeats expire after 45 seconds; saved filters can resume on reconnection unless a new live owner has claimed an overlapping chat.
+
+Subscriptions from different live sessions cannot overlap. A session with `all` therefore excludes every other live subscriber; use `all_except` to reserve chats for an `only` subscriber. To transfer a chat between live sessions, first remove it from the current session's filter, then add it to the destination. An offline session does not hold a chat against a live claimant. If its saved broad filter conflicts when it reconnects, the broker drops that filter and the session must subscribe again.
 
 The WebSocket adapter accepts configured event types generically and keeps their original payloads. It supports current event envelopes and the original server's card-frame compatibility behavior. Incoming payloads must contain a chat ID in `event.context.open_chat_id`, `event.message.chat_id`, `event.chat_id`, or `event.open_chat_id`; malformed payloads fail ingestion rather than being routed by a different identity.
 
@@ -128,24 +130,23 @@ The script validates app authentication, waits for the WebSocket to connect, and
 
 ## Codex delivery adapter
 
-`node scripts/codex-adapter.mjs` registers the current Codex thread as a broker session using `LARK_BRIDGE_SESSION_ID`, `CODEX_THREAD_ID`, or `CODEX_SESSION_ID`. Give it the same private `LARK_BRIDGE_CONFIG` as the broker. Assign a chat with `node scripts/bridge-events.mjs assign --session <THREAD_ID> <CHAT_ID>`. The adapter batches new events until five seconds pass without another event, or flushes immediately when six are pending. Repeated broker notices for the same events do not reset the timer. It queues one compact batch to that thread with `codex queue --thread <THREAD_ID>` and acknowledges it after Codex accepts the queue request. The agent does not handle delivery receipts.
+`node scripts/codex-adapter.mjs` registers the current Codex thread as a broker session using `LARK_BRIDGE_SESSION_ID`, `CODEX_THREAD_ID`, or `CODEX_SESSION_ID`. Give it the same private Lark config as the broker. Subscribe a chat with `node scripts/bridge-events.mjs assign --session <THREAD_ID> <CHAT_ID>`. The adapter batches new events until five seconds pass without another event, or flushes immediately when six are pending. Repeated broker notices for the same events do not reset the timer. It queues one compact batch to that thread with `codex queue --thread <THREAD_ID>` and acknowledges it after Codex accepts the queue request. The agent does not handle delivery receipts.
 
-Codex loads the outbound MCP tools from `~/.codex/config.toml`, for example:
-
-```toml
-[mcp_servers.lark_bridge]
-command = "node"
-args = ["/absolute/path/to/Lark_Bridge/dist/index.js"]
-
-[mcp_servers.lark_bridge.env]
-LARK_BRIDGE_CONFIG = "/absolute/path/to/private/lark-bridge.json"
-```
+Codex loads the outbound MCP tools from this repository's `.codex/config.toml`.
 
 The MCP process alone does not subscribe the Codex thread to a chat: Codex may
 not pass its thread ID to that process. Start an adapter bound to the actual
-thread ID, then assign the chat ID to it. The broker keeps one route per chat,
-so a new session receives that chat only after an explicit assignment.
+thread ID, then set a chat filter for it. A new session receives no chat until
+it subscribes, and overlapping filters are rejected while both sessions live.
 
-`node scripts/bridge-events.mjs events --session <THREAD_ID>` retrieves a compact batch and handles acknowledgment. Pass `--raw` for the original full batch. These commands require the same private `LARK_BRIDGE_CONFIG` environment variable. A session MCP server with `LARK_BRIDGE_HARNESS=codex` can also deliver messages directly; it must have a stable `LARK_BRIDGE_SESSION_ID` or a Codex thread ID in its environment. Run one registered adapter per thread at a time.
+`node scripts/bridge-events.mjs events --session <THREAD_ID>` retrieves a compact batch and handles acknowledgment. Pass `--raw` for the original full batch. These commands load `.codex/local-config.json` unless `LARK_BRIDGE_CONFIG` is set. A session MCP server with `LARK_BRIDGE_HARNESS=codex` can also deliver messages directly; it must have a stable `LARK_BRIDGE_SESSION_ID` or a Codex thread ID in its environment. Run one registered adapter per thread at a time.
 
-For automatic lifecycle management, configure Codex `SessionStart` (`startup|resume|clear`) and `SessionEnd` command hooks to run `scripts/codex-hook.mjs start` and `scripts/codex-hook.mjs end`. Set `LARK_BRIDGE_CONFIG` in both hook commands. The hook reads Codex's `session_id` from its JSON stdin, starts the adapter detached, and stops only its recorded adapter at session end. Codex requires local hooks to be reviewed and trusted through `/hooks` before they run. Register `dist/index.js` as a stdio MCP server too, so the agent can use outbound Lark tools and inspect raw events when needed. Existing sessions may need to restart to load the MCP configuration.
+The CLI can also set filters for a live thread:
+
+```bash
+node scripts/bridge-events.mjs subscribe --session <THREAD_ID> all
+node scripts/bridge-events.mjs subscribe --session <THREAD_ID> all-except oc_reserved
+node scripts/bridge-events.mjs subscribe --session <THREAD_ID> only oc_one oc_two
+```
+
+This repository includes project-scoped `.codex/config.toml` and `.codex/hooks.json`. They load the MCP server and run `SessionStart` (`startup`, `resume`, `clear`, `fork`) and `SessionEnd` hooks only for trusted Codex sessions opened in this repository. Put a private Lark config at `.codex/local-config.json` (or symlink that ignored path to a config elsewhere); `LARK_BRIDGE_CONFIG` still overrides it. The hook reads Codex's `session_id` from its JSON stdin, starts the adapter detached, and stops only its recorded adapter at session end. Codex requires local hooks to be reviewed and trusted through `/hooks` before they run; newly changed hook definitions need review again. Existing sessions may need to restart to load the project configuration.

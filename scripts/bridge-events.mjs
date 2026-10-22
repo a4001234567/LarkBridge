@@ -5,8 +5,8 @@ import { expandForwardedEvents } from '../dist/enrich-events.js';
 import { getLarkClient } from '../dist/client.js';
 import { writeSync } from 'node:fs';
 
-const [command, flag, target, option] = process.argv.slice(2);
-if (!['events', 'assign', 'sessions'].includes(command)) throw new Error('Usage: bridge-events.mjs events|assign|sessions --session SESSION [--raw|CHAT_ID]');
+const [command, flag, target, ...options] = process.argv.slice(2);
+if (!['events', 'assign', 'subscribe', 'sessions'].includes(command)) throw new Error('Usage: bridge-events.mjs events|assign|subscribe|sessions --session SESSION [--raw|CHAT_ID|MODE CHAT_IDS...]');
 if (flag !== '--session' || !target) throw new Error('Pass --session with the Codex thread ID');
 const bridge = new Bridge(config(), {
   session_id: `cli-${process.pid}`,
@@ -18,6 +18,7 @@ try {
   await bridge.open();
   let result;
   if (command === 'events') {
+    const option = options[0];
     if (option && option !== '--raw') throw new Error('Expected --raw');
     result = await bridge.call('fetch_for', { session_id: target, limit: 20 });
     const shown = option === '--raw' ? result : await expandForwardedEvents(result,
@@ -30,8 +31,16 @@ try {
       await bridge.call('ack_for', { session_id: target, id: event.id, receipt: event.receipt });
   }
   if (command === 'assign') {
+    const option = options[0];
     if (!option?.startsWith('oc_')) throw new Error('Pass chat ID after --session');
     result = await bridge.call('route', { session_id: target, chat_id: option });
+  }
+  if (command === 'subscribe') {
+    const [modeArg, ...chats] = options;
+    const mode = modeArg === 'all-except' ? 'all_except' : modeArg;
+    if (!['all', 'all_except', 'only'].includes(mode) || chats.some(chat => !chat.startsWith('oc_')))
+      throw new Error('Use subscribe --session SESSION all|all-except|only [CHAT_IDS...]');
+    result = await bridge.call('subscribe', { session_id: target, mode, chats });
   }
   if (command === 'sessions') result = await bridge.call('sessions');
   if (command !== 'events') writeSync(1, JSON.stringify(result, null, 2) + '\n');
