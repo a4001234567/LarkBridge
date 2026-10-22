@@ -92,3 +92,29 @@ test('repeated notices do not extend the quiet window', async () => {
   await wait(25);
   assert.equal(delivered, true);
 });
+
+test('active Codex turn keeps events available for tool hooks instead of queueing them', async () => {
+  const event = { id: 'mid-turn', chat_id: 'oc_group', type: 'im.message.receive_v1',
+    received_at: Date.now(), receipt: 'lease', payload: { event: {
+      sender: { sender_id: { open_id: 'ou_user' } },
+      message: { chat_id: 'oc_group', message_type: 'text', content: '{"text":"follow-up"}' },
+    } } };
+  let active = true, fetched = 0, queued = 0;
+  class FakeBridge extends EventEmitter {
+    async call(method: string): Promise<any> {
+      if (method === 'fetch_for') { fetched++; return [event]; }
+      if (method === 'ack_for') return {};
+      throw new Error(`Unexpected ${method}`);
+    }
+  }
+  const bridge = new FakeBridge();
+  new CodexNotifier('thread-id', bridge, async () => { queued++; }, undefined,
+    { quietMs: 10, maxPending: 6, retryMs: 10 }, () => active);
+  bridge.emit('notice', { events: [event] });
+  await wait(25);
+  assert.equal(fetched, 0);
+  assert.equal(queued, 0);
+  active = false;
+  await wait(25);
+  assert.equal(queued, 1);
+});

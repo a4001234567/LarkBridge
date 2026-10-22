@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { config } from '../dist/config.js';
+import { clearCodexTurn } from '../dist/codex-activity.js';
 
 const action = process.argv[2];
 if (action !== 'start' && action !== 'end') throw new Error('Expected start or end');
@@ -23,6 +24,7 @@ function running(pid) {
 let previous;
 try { previous = Number(readFileSync(pidFile, 'utf8')); } catch {}
 if (action === 'end') {
+  clearCodexTurn(config().stateDir, thread);
   if (running(previous)) process.kill(previous, 'SIGTERM');
   try { unlinkSync(pidFile); } catch {}
 } else if (!running(previous)) {

@@ -23,6 +23,26 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [
+        { "type": "command", "command": "node \"$(git rev-parse --show-toplevel)/scripts/codex-delivery-hook.mjs\"", "timeout": 5 }
+      ] }
+    ],
+    "PostToolUse": [
+      { "hooks": [
+        { "type": "command", "command": "node \"$(git rev-parse --show-toplevel)/scripts/codex-delivery-hook.mjs\"", "timeout": 30, "additionalContextLimit": 0 }
+      ] }
+    ],
+    "Stop": [
+      { "hooks": [
+        { "type": "command", "command": "node \"$(git rev-parse --show-toplevel)/scripts/codex-delivery-hook.mjs\"", "timeout": 30 }
+      ] }
+    ],
+    "Interrupt": [
+      { "hooks": [
+        { "type": "command", "command": "node \"$(git rev-parse --show-toplevel)/scripts/codex-delivery-hook.mjs\"", "timeout": 3 }
+      ] }
     ]
   }
 }

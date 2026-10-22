@@ -81,6 +81,50 @@ test("Unix socket RPC registers sessions, routes, claims, acknowledges and rejec
   await assert.rejects(a.call("token", { kind: "tenant" }), /offline/);
 });
 
+test('PostToolUse injects a Lark follow-up into the active turn and acknowledges it', async (t) => {
+  const dir = temporary(t), configPath = join(dir, 'config.json');
+  writeFileSync(configPath, JSON.stringify({ appId: 'hook-test', stateDir: dir, offline: true, continuous: true }));
+  const cfg: Config = { appId: 'hook-test', stateDir: dir, socket: join(dir, 'broker.sock'),
+    domain: 'https://open.feishu.cn', offline: true, continuous: true, graceMs: 1000 };
+  const broker = await serve(cfg);
+  t.after(() => broker.close());
+  const session = new Bridge(cfg, { session_id: 'hook-thread', name: 'Hook thread', harness: 'codex' });
+  t.after(() => session.close());
+  await session.open(false);
+  await session.call('route', { chat_id: 'oc_hook', session_id: 'hook-thread' });
+  broker.store.ingest({ schema: '2.0', header: { event_id: 'hook-event', event_type: 'im.message.receive_v1' },
+    event: { sender: { sender_id: { open_id: 'ou_user' } }, message: {
+      chat_id: 'oc_hook', chat_type: 'p2p', message_type: 'text', content: '{"text":"more context"}',
+    } } });
+  const child = spawn(process.execPath, [resolve('scripts/codex-delivery-hook.mjs')], {
+    cwd: resolve('.'), env: { ...process.env, LARK_BRIDGE_CONFIG: configPath, LARK_BRIDGE_OFFLINE: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  child.stdin.end(JSON.stringify({ hook_event_name: 'PostToolUse', session_id: 'hook-thread', turn_id: 'turn-1' }));
+  let output = '', errors = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { errors += chunk; });
+  const [code] = await once(child, 'close');
+  assert.equal(code, 0, errors);
+  const result = JSON.parse(output);
+  assert.match(result.hookSpecificOutput.additionalContext, /"more context"/);
+  assert.deepEqual(await session.call('fetch'), []);
+  broker.store.ingest({ schema: '2.0', header: { event_id: 'hook-stop', event_type: 'im.message.receive_v1' },
+    event: { sender: { sender_id: { open_id: 'ou_user' } }, message: {
+      chat_id: 'oc_hook', chat_type: 'p2p', message_type: 'text', content: '{"text":"last follow-up"}',
+    } } });
+  const stop = spawn(process.execPath, [resolve('scripts/codex-delivery-hook.mjs')], {
+    cwd: resolve('.'), env: { ...process.env, LARK_BRIDGE_CONFIG: configPath, LARK_BRIDGE_OFFLINE: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  stop.stdin.end(JSON.stringify({ hook_event_name: 'Stop', session_id: 'hook-thread', turn_id: 'turn-1' }));
+  let stopOutput = '';
+  stop.stdout.on('data', chunk => { stopOutput += chunk; });
+  assert.deepEqual(await once(stop, 'close'), [0, null]);
+  assert.match(JSON.parse(stopOutput).reason, /"last follow-up"/);
+  assert.deepEqual(await session.call('fetch'), []);
+});
+
 test("client retries broker launch while a previous startup lock is held", { timeout: 25000 }, async (t) => {
   const dir = temporary(t), configPath = join(dir, "config.json");
   writeFileSync(configPath, JSON.stringify({ appId: "offline-restart", stateDir: dir, graceMs: 1000 }));
