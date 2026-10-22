@@ -48,26 +48,8 @@ export function messageText(message: any): string {
     return `[image image_key=${body?.image_key ?? "?"} message_id=${message.message_id ?? "?"}]`;
   if (["audio", "file", "media"].includes(type))
     return `[${type} file_key=${body?.file_key ?? "?"}${body?.file_name ? ` name=${JSON.stringify(body.file_name)}` : ""} message_id=${message.message_id ?? "?"}]`;
-  if (type === "interactive") {
-    // Lark's flattened card content may contain only a client-upgrade fallback.
-    // The original schema 2.0 card is preserved as a JSON string in user_dsl.
-    const dsl = content(body?.user_dsl);
-    const card = dsl && typeof dsl === "object" && !Array.isArray(dsl) ? dsl : body;
-    const texts: string[] = [];
-    const collect = (node: any, depth = 0) => {
-      if (!node || depth > 12 || texts.length >= (card === body ? 12 : 2)) return;
-      if (Array.isArray(node)) { for (const child of node) collect(child, depth + 1); return; }
-      if (typeof node !== "object") return;
-      if (typeof node.content === "string" && node.content.trim()) texts.push(node.content.trim());
-      else if (typeof node.text === "string" && node.text.trim()) texts.push(node.text.trim());
-      for (const key of ["header", "title", "body", "elements", "fields", "actions", "text"])
-        if (typeof node[key] === "object") collect(node[key], depth + 1);
-    };
-    collect(card);
-    const summary = texts.map(text => JSON.stringify(text.slice(0, 300))).join(" | ") ||
-      (card?.data?.template_id ? `template=${card.data.template_id}` : "");
-    return `[card${summary ? ` ${summary}` : ""} message_id=${message.message_id ?? "?"}]`;
-  }
+  if (type === "interactive")
+    return `${JSON.stringify(body)}  message_id=${message.message_id ?? "?"}`;
   return typeof body === "string" ? JSON.stringify(body) : JSON.stringify(body ?? {});
 }
 

@@ -95,11 +95,11 @@ test("mentions and attachment types retain the details needed to act", () => {
   assert.match(result, /"Hi @Bot\(ou_bot\)"/);
   assert.match(result, /\[audio file_key=file_voice message_id=om_audio\]/);
   assert.match(result, /\[file file_key=file_doc name="report.pdf" message_id=om_file\]/);
-  assert.match(result, /\[card "Approve\?" \| "Review the report" message_id=om_card\]/);
+  assert.match(result, /\{"header":\{"title":\{"content":"Approve\?"\}\},"body":\{"elements":\[\{"tag":"markdown","content":"Review the report"\}\]\}\}  message_id=om_card/);
   assert.match(result, /\[forwarded chat history message_id=om_forward\]/);
 });
 
-test("interactive cards prefer the original user_dsl over Lark's fallback text", () => {
+test("interactive cards preserve the original content, including user_dsl", () => {
   const dsl = {
     schema: "2.0",
     header: { title: { tag: "plain_text", content: "Release notes" } },
@@ -113,6 +113,8 @@ test("interactive cards prefer the original user_dsl over Lark's fallback text",
         content: JSON.stringify({ title: "Release notes", elements: [[{ tag: "text", text: "请升级至最新版本客户端，以查看内容" }]], user_dsl: JSON.stringify(dsl) }) },
     } },
   }]);
-  assert.match(result, /\[card "Release notes" \| "A short update" message_id=om_card\]/);
-  assert.doesNotMatch(result, /请升级至最新版本客户端/);
+  assert.match(result, /请升级至最新版本客户端/);
+  assert.match(result, /user_dsl/);
+  assert.match(result, /A short update/);
+  assert.match(result, /message_id=om_card/);
 });
