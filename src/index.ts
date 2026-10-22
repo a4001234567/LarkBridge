@@ -5,11 +5,17 @@ import { config } from "./config.js";
 import { Bridge, setBridge } from "./bridge.js";
 import { registerImTools } from "./tools/im.js";
 import { registerCardTools } from "./tools/cards.js";
-import { withAuth } from "./client.js";
+import { registerPeopleTools } from "./tools/people.js";
+import { registerCalendarTools } from "./tools/calendar.js";
+import { registerTaskTools } from "./tools/task.js";
+import { registerDocTools } from "./tools/docs.js";
+import { registerTokenProxyTools, closeTokenProxy } from "./tools/token-proxy.js";
+import { asUser, withAuth } from "./client.js";
 import { CodexNotifier } from "./codex-notifier.js";
 import { formatEvents } from "./format-events.js";
 import { expandForwardedEvents } from "./enrich-events.js";
 import { getLarkClient } from "./client.js";
+import { MODULE_SCOPES, scopesForModule } from "./auth-guard.js";
 
 const session_id = process.env.LARK_BRIDGE_SESSION_ID ?? process.env.CODEX_THREAD_ID ?? process.env.CODEX_SESSION_ID ?? `mcp-${process.pid}`;
 const bridge = new Bridge(config(), {
@@ -25,6 +31,11 @@ const server = new McpServer(
 );
 registerImTools(server);
 registerCardTools(server);
+registerPeopleTools(server);
+registerCalendarTools(server);
+registerTaskTools(server);
+registerDocTools(server);
+registerTokenProxyTools(server);
 server.tool(
   "feishu_bridge_sessions",
   "List sessions and chat assignments.",
@@ -85,20 +96,80 @@ server.tool(
 );
 server.tool(
   "feishu_auth_status",
-  "Get shared user authorization status.",
+  "Get shared user authorization status and granted modules.",
   {},
-  () => withAuth(() => bridge.call("auth_status")),
+  () => withAuth(async () => {
+    const status = await bridge.call("auth_status");
+    const granted_modules = status.authenticated && status.scopes?.length
+      ? Object.entries(MODULE_SCOPES).filter(([, scopes]) => scopes.every(scope => status.scopes.includes(scope))).map(([name]) => name)
+      : [];
+    return { ...status, granted_modules,
+      pending_modules: Object.keys(MODULE_SCOPES).filter(name => !granted_modules.includes(name)) };
+  }),
+);
+server.tool(
+  "feishu_auth_whoami",
+  "Return the authenticated user's open_id, name, and user_id.",
+  {},
+  () => withAuth(async () => {
+    const res = await (getLarkClient().authen as any).userInfo.get({}, await asUser());
+    if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+    const user = res.data?.user_info ?? res.data ?? {};
+    return { open_id: user.open_id, name: user.name, en_name: user.en_name, user_id: user.user_id };
+  }),
 );
 server.tool(
   "feishu_auth_init",
-  "Start shared OAuth device authorization. Open the returned URL; the broker polls and saves authorization in the background.",
+  "Start shared OAuth device authorization for a module or explicit scopes. The broker polls in the background. Optionally send the authorization link as a Lark card.",
   {
-    scope: z
-      .string()
-      .describe("Space-separated Lark OAuth scopes")
-      .default("offline_access"),
+    module: z.enum(["im", "calendar", "task", "docs", "people", "all"]).default("all"),
+    scope: z.string().optional().describe("Space-separated OAuth scopes; overrides module"),
+    receive_id: z.string().regex(/^(ou_|oc_)/).optional().describe("Open ID or chat ID to receive the authorization card"),
   },
-  (args) => withAuth(() => bridge.call("auth_start", args)),
+  ({ module, scope, receive_id }) => withAuth(async () => {
+    const result = await bridge.call("auth_start", { scope: scope ?? scopesForModule(module).join(" ") });
+    if (!receive_id || !result.verification_url) return result;
+    const sent = await getLarkClient().im.message.create({
+      params: { receive_id_type: receive_id.startsWith("oc_") ? "chat_id" : "open_id" },
+      data: { receive_id, msg_type: "interactive", content: JSON.stringify({
+        schema: "2.0", header: { template: "blue", title: { tag: "plain_text", content: "Authorize Lark access" } },
+        body: { elements: [
+          { tag: "markdown", content: `Authorize **${module}** access for the Lark Bridge.` },
+          { tag: "button", type: "primary", text: { tag: "plain_text", content: "Open authorization" },
+            behaviors: [{ type: "open_url", default_url: result.verification_url }] },
+        ] },
+      }) },
+    });
+    if (sent.code !== 0) throw new Error(`Could not send authorization card: ${sent.msg}`);
+    return { ...result, message_id: sent.data?.message_id };
+  }),
+);
+const scheduleTarget = (requested?: string) => {
+  const target = requested ?? (session_id.startsWith("mcp-") ? undefined : session_id);
+  if (!target) throw new Error("Pass session_id for the agent session that should receive the reminder");
+  return target;
+};
+server.tool(
+  "feishu_schedule_create",
+  "Create a one-shot or recurring reminder delivered to an agent session by the broker. Pass the Codex thread ID as session_id when using a separate MCP process.",
+  {
+    session_id: z.string().optional(), label: z.string().min(1),
+    fire_at: z.string().optional(), cron: z.string().optional(),
+    timezone: z.string().default("Asia/Shanghai"),
+  },
+  (args) => withAuth(() => bridge.call("schedule_create", { ...args, session_id: scheduleTarget(args.session_id) })),
+);
+server.tool(
+  "feishu_schedule_list",
+  "List pending reminders for an agent session.",
+  { session_id: z.string().optional() },
+  (args) => withAuth(() => bridge.call("schedule_list", { session_id: scheduleTarget(args.session_id) })),
+);
+server.tool(
+  "feishu_schedule_delete",
+  "Delete a pending reminder by ID.",
+  { session_id: z.string().optional(), id: z.string() },
+  (args) => withAuth(() => bridge.call("schedule_delete", { session_id: scheduleTarget(args.session_id), id: args.id })),
 );
 let lastNotice = "",
   lastNoticeAt = 0,
@@ -141,6 +212,7 @@ const close = () => {
   if (closing) return;
   closing = true;
   bridge.close();
+  closeTokenProxy();
   void server.close();
 };
 process.once("SIGINT", close);

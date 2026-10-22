@@ -27,6 +27,12 @@ export async function asUser() {
     (await getBridge().call("token", { kind: "user" })).token,
   );
 }
+export async function getUserToken(): Promise<string> {
+  return (await getBridge().call("token", { kind: "user" })).token;
+}
+export async function getTenantAccessToken(): Promise<string> {
+  return (await getBridge().call("token", { kind: "tenant" })).token;
+}
 export function assertOk(res: any) {
   if (res.code !== undefined && res.code !== 0)
     throw new Error(`Lark API ${res.code}: ${res.msg}`);

@@ -56,6 +56,7 @@ export function messageText(message: any): string {
 /** The agent sees message content and source; delivery tokens stay with the mediator. */
 export function formatEvents(events: ClaimedEvent[]): string {
   if (!events.length) return "No pending Lark events.";
+  const schedules: string[] = [];
   type Line = { at: number; order: number; body: string };
   type Source = { actor?: string; lines: Line[] };
   type Chat = { type?: string | null; sources: Map<string, Source> };
@@ -63,6 +64,11 @@ export function formatEvents(events: ClaimedEvent[]): string {
   for (const [order, item] of events.entries()) {
     const raw = item.payload ?? {};
     const event = raw.event ?? raw;
+    if (item.type === "bridge.schedule.fire") {
+      const schedule = event.schedule ?? {};
+      schedules.push(`[schedule fired] ${time(item.received_at)}  ${JSON.stringify(schedule.label ?? "")}`);
+      continue;
+    }
     const isMessage = item.type === "im.message.receive_v1" && event.message;
     const isCard = item.type === "card.action.trigger";
     const chatType = item.chat_type ?? (isMessage ? event.message.chat_type : undefined);
@@ -97,7 +103,7 @@ export function formatEvents(events: ClaimedEvent[]): string {
     }
     source.lines.push({ at: Number.isFinite(at) && at > 0 ? at : Number(item.received_at), order, body });
   }
-  return [...chats].map(([chatId, chat]) => {
+  const messages = [...chats].map(([chatId, chat]) => {
     const sources = [...chat.sources.values()];
     for (const source of sources) source.lines.sort((a, b) => a.at - b.at || a.order - b.order);
     sources.sort((a, b) => a.lines[0].at - b.lines[0].at || a.lines[0].order - b.lines[0].order);
@@ -115,5 +121,6 @@ export function formatEvents(events: ClaimedEvent[]): string {
       return p2p ? lines.join("\n") : [`  user: ${source.actor ?? "unknown"}`, ...lines].join("\n");
     });
     return [p2p ? `user: ${sources[0].actor}` : `chat: ${chatId}`, ...blocks].join("\n");
-  }).join("\n\n");
+  });
+  return [...messages, ...schedules].join("\n\n");
 }

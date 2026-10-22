@@ -62,7 +62,9 @@ The broker can import the original server's keyed, AES-256-GCM encrypted `tokens
 
 Before a live cutover, stop the old server's OAuth refresher for this app/user authorization. Two independently running refreshers can rotate the same refresh token. The shared app-scoped lock now prevents the updated legacy server and bridge from opening two local event connections, but older installed copies that do not use this lock must still be stopped. Importing is a migration, not a mechanism for sharing token state with the old process.
 
-For fresh authorization, call `feishu_auth_init` with the required scope string. It returns a verification URL immediately; the broker polls in the background. `feishu_auth_status` reports completion. Messaging as the app uses a tenant token and does not require user OAuth. No credentials are returned in agent-visible status tools.
+For fresh authorization, call `feishu_auth_init` with a module name (default `all`) or an explicit scope string. It returns a verification URL immediately; the broker polls in the background. Pass `receive_id` to also send an authorization card to a Lark user or chat. `feishu_auth_status` reports completion and module scope status. Messaging as the app uses a tenant token and does not require user OAuth. No credentials are returned in agent-visible status tools.
+
+The migrated people, calendar, task, and document tools use the broker's shared user token. When authorization or a recorded module scope is missing, a tool returns the verification URL from the broker's device flow; authorize and retry the tool. Tenant-token wiki operations remain available without user OAuth where Lark permits them.
 
 ## Session operation
 
@@ -94,6 +96,9 @@ The WebSocket adapter accepts configured event types generically and keeps their
 
 - Original `feishu_im_send`: plain text, rich posts, interactive cards, image/file uploads, and message replies.
 - Original read, resource-download, and message-search tools from `tools/im.ts`; search obtains a user token from the broker.
+- People search, calendar, task, document, and wiki tools from Yet Another Lark MCP. User-authenticated SDK calls and direct HTTPS calls obtain tokens through the broker.
+- `feishu_auth_whoami` and `feishu_auth_issue_token`. The latter starts a local HTTP proxy, sends a monitoring card, and registers its Stop button with the broker for immediate revocation.
+- `feishu_schedule_create`, `feishu_schedule_list`, and `feishu_schedule_delete`. Reminders persist in the broker and are delivered to a specific agent session without a chat subscription; pass `session_id` when the tool's own MCP process has a separate identity.
 - `feishu_im_send_confirm` and `feishu_im_send_form`: original card builders, default asynchronous delivery, optional blocking result.
 - `feishu_im_send_progress` / `feishu_im_patch_progress`: progress cards and immediate Stop responses.
 - `feishu_im_send_card`: custom cards with serializable immediate responses keyed by `action.value.action`.
@@ -101,11 +106,11 @@ The WebSocket adapter accepts configured event types generically and keeps their
 
 Registered-card tools take a chat ID as `receive_id`, so registration exists before the send. A correlation ID is embedded in callback values, then bound to the returned message ID. A click arriving before binding still finds its registration. The original general-purpose send tool continues accepting its other recipient types.
 
-Card callbacks are persisted and acknowledged with predefined toasts/inline card updates without waiting for an agent. Blocking waits retrieve only their card's events and still obey the current chat assignment: they do not pull a callback out of another session's inbox. Expiry is maintained by the broker even when no agent is watching. Asynchronous expired cards return an expiry toast on click; automatic REST patching of their appearance is not implemented. Executable custom hooks such as the original token-proxy revocation handler require a dedicated tool-side handler and are not copied into the broker.
+Card callbacks are persisted and acknowledged with predefined toasts/inline card updates without waiting for an agent. Blocking waits retrieve only their card's events and still obey the current chat assignment: they do not pull a callback out of another session's inbox. Expiry is maintained by the broker even when no agent is watching. Asynchronous expired cards return an expiry toast on click; automatic REST patching of their appearance is not implemented. The token-proxy Stop action is a dedicated broker-side exception that revokes the proxy token before the callback response is sent.
 
 ## Scope and validation
 
-This implements the broker, shared auth, socket session adapter, compact messaging/card tools, MCP event retrieval/acknowledgement, and a Codex `codex queue` wake-up adapter. It does not create agent sessions. Native Claude Channels integration remains future work; MCP logging notifications alone do not guarantee that a harness starts an agent turn. Calendar, task, document, scheduling, and token-proxy modules from the sibling server are not yet ported.
+This implements the broker, shared auth, socket session adapter, messaging and card tools, people/calendar/task/document/wiki tools, session reminders, a local token proxy, MCP event retrieval/acknowledgement, and a Codex `codex queue` wake-up adapter. The original `feishu_im_watch` is replaced by broker subscriptions and event delivery; it is not exposed as a second blocking receiver. The bridge does not create agent sessions. Native Claude Channels integration remains future work; MCP logging notifications alone do not guarantee that a harness starts an agent turn.
 
 ```bash
 npm test

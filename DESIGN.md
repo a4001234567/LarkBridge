@@ -7,9 +7,9 @@ agent sessions or make the broker responsible for the agent's replies.
 
 | Component | Responsibility |
 | --- | --- |
-| Broker | Own the app's one long-lived Lark event connection, token refresh, SQLite event queue, chat subscriptions, and immediate card callback responses. |
+| Broker | Own the app's one long-lived Lark event connection, token refresh, SQLite event queue, chat subscriptions, session reminders, and immediate card callback responses. |
 | Session adapter | Register a stable agent-session ID, receive broker notices, and deliver events to that session. The Codex adapter uses `codex queue`. |
-| Stdio MCP server | Give an agent independent tools to send and reply to messages, read context, upload resources, and create or update cards. It asks the broker for tokens, then calls Lark directly. |
+| Stdio MCP server | Give an agent independent message, card, people, calendar, task, document, wiki, and token-proxy tools. It asks the broker for tokens, then calls Lark directly. |
 
 The broker is detached from the session that starts it. A startup `flock` prevents
 duplicate brokers. A second, app-scoped `flock` is held for the full WebSocket
@@ -54,6 +54,11 @@ sender/day, resolves text mentions, and includes resource keys and message IDs
 when needed to fetch attachments. `feishu_bridge_events(raw=true)` exposes the
 original payload when the compact view is insufficient.
 
+The original watch-loop schedules are persisted by the broker and produce
+session-targeted reminder events. They have no Lark chat ID, so chat filters do
+not decide their destination. A reminder for an offline session remains queued
+until that session reconnects.
+
 ## Outbound tools and cards
 
 Outbound actions stay independent of event delivery. An agent can call the MCP
@@ -69,7 +74,9 @@ persists each click as a chat-routed event and immediately returns the predefine
 toast or inline card update to Lark. The assigned agent later receives the
 action and any form values. This avoids waiting for an agent turn inside Lark's
 callback response path. Custom executable handlers belong in a tool process,
-not in the broker's persisted interaction record.
+not in the broker's persisted interaction record. The local API token proxy is
+an exception: its Stop card revokes a hashed token in broker state immediately,
+while the proxy process still makes the outbound HTTP requests.
 
 ## Boundaries
 

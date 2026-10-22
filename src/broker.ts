@@ -37,7 +37,7 @@ const schemas: Record<string, z.ZodTypeAny> = {
     id,
     chat_id: chat,
     expires_at: z.number().finite(),
-    kind: z.enum(["confirm", "form", "progress", "custom"]),
+    kind: z.enum(["confirm", "form", "progress", "custom", "proxy_token"]),
     data: z.any(),
     responses: z.record(z.any()).optional(),
   }),
@@ -55,6 +55,16 @@ const schemas: Record<string, z.ZodTypeAny> = {
   ack_for: z.object({ session_id: id, id: id.optional(), receipt: id }),
   raw_for: z.object({ session_id: id, id: id.optional(), receipt: id }),
   status: z.object({}),
+  schedule_create: z.object({
+    session_id: id, label: z.string().min(1).max(1000),
+    fire_at: z.string().optional(), cron: z.string().optional(),
+    timezone: z.string().default("Asia/Shanghai"),
+  }),
+  schedule_list: z.object({ session_id: id }),
+  schedule_delete: z.object({ session_id: id, id }),
+  proxy_issue: z.object({ hash: z.string().regex(/^[a-f0-9]{64}$/), expires_at: z.number().finite() }),
+  proxy_check: z.object({ hash: z.string().regex(/^[a-f0-9]{64}$/) }),
+  proxy_revoke: z.object({ hash: z.string().regex(/^[a-f0-9]{64}$/) }),
 };
 
 export async function serve(cfg: Config) {
@@ -193,6 +203,19 @@ export async function serve(cfg: Config) {
             connection: ws?.status(),
             auth: auth.status(),
           };
+        case "schedule_create":
+          return store.createSchedule(args.session_id, args.label, args.fire_at, args.cron, args.timezone);
+        case "schedule_list":
+          return { schedules: store.listSchedules(args.session_id) };
+        case "schedule_delete":
+          return { deleted: store.deleteSchedule(args.session_id, args.id), id: args.id };
+        case "proxy_issue":
+          store.issueProxyToken(args.hash, args.expires_at);
+          return {};
+        case "proxy_check":
+          return store.proxyTokenStatus(args.hash);
+        case "proxy_revoke":
+          return { revoked: store.revokeProxyToken(args.hash) };
       }
     };
     socket.on("data", (chunk) => {
@@ -275,6 +298,7 @@ export async function serve(cfg: Config) {
     for (const [, peer] of peers)
       if (Date.now() - peer.seen > 45_000) peer.socket.destroy();
     store.expire();
+    store.fireSchedules();
     notify();
     if (
       !cfg.continuous &&

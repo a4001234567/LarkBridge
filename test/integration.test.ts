@@ -182,6 +182,19 @@ test(
       "feishu_im_patch_progress",
       "feishu_bridge_events",
       "feishu_bridge_subscribe",
+      "feishu_auth_whoami",
+      "feishu_people_search",
+      "feishu_calendar_create",
+      "feishu_calendar_list",
+      "feishu_task_create",
+      "feishu_task_list",
+      "feishu_doc_search",
+      "feishu_doc_fetch",
+      "feishu_wiki_list_spaces",
+      "feishu_schedule_create",
+      "feishu_schedule_list",
+      "feishu_schedule_delete",
+      "feishu_auth_issue_token",
     ])
       assert.ok(tools.tools.some((x) => x.name === name));
     await a.close();

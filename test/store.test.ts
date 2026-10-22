@@ -117,6 +117,38 @@ test("a broad filter does not reclaim chats held when its session reconnects", (
   assert.equal(s.claim("b")[0].id, "one");
   assert.equal(s.list().subscriptions.some((item: any) => item.session === "a"), false);
 });
+test("a session reminder fires without a chat subscription and survives delivery", (t) => {
+  const { s } = setup(t);
+  s.register("a", "A", "codex");
+  const schedule = s.createSchedule("a", "Check the bridge", new Date(Date.now() - 1000).toISOString());
+  assert.equal(s.fireSchedules(), 1);
+  assert.deepEqual(s.listSchedules("a"), []);
+  const [event] = s.claim("a");
+  assert.equal(event.type, "bridge.schedule.fire");
+  assert.equal(event.payload.event.schedule.label, "Check the bridge");
+  assert.equal(s.claim("a").length, 0);
+  s.ack("a", event.id, event.receipt);
+  assert.equal(s.claim("a").length, 0);
+  assert.equal(schedule.label, "Check the bridge");
+});
+test("a token monitoring card revokes its proxy token only from its own chat", (t) => {
+  const { s } = setup(t);
+  const hash = "a".repeat(64);
+  const expires = Date.now() + 60_000;
+  s.issueProxyToken(hash, expires);
+  s.interaction({ id: "token-card", chat_id: "oc_one", expires_at: expires,
+    kind: "proxy_token", data: { token_hash: hash },
+    responses: { stop_token: { toast: { type: "success", content: "revoked" } } } });
+  const action = click("foreign", "oc_other", "token-card");
+  action.event.action.value.action = "stop_token";
+  s.ingest(action);
+  assert.equal(s.proxyTokenStatus(hash).valid, true);
+  action.header.event_id = "local";
+  action.event.context.open_chat_id = "oc_one";
+  assert.equal(s.ingest(action).response.toast.content, "revoked");
+  assert.equal(s.proxyTokenStatus(hash).valid, false);
+  assert.equal(s.proxyTokenStatus(hash).revoked, true);
+});
 test("pause, disconnect and expired leases retain events", (t) => {
   const { s } = setup(t);
   s.register("a", "A", "mcp");

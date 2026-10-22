@@ -7,6 +7,7 @@ import {
   type CardEntry,
 } from "./cards/interactive.js";
 import { buildProgressCard } from "./cards/progress.js";
+import { Cron } from "croner";
 import { matches, overlaps, type Subscription, type SubscriptionMode } from "./subscriptions.js";
 
 export type Interaction = {
@@ -14,7 +15,7 @@ export type Interaction = {
   chat_id: string;
   message_id?: string;
   expires_at: number;
-  kind: "confirm" | "form" | "progress" | "custom";
+  kind: "confirm" | "form" | "progress" | "custom" | "proxy_token";
   data: any;
   responses?: Record<string, any>;
   status?: string;
@@ -30,6 +31,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS chats(chat TEXT PRIMARY KEY, type TEXT, peer TEXT);
       CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, chat TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, received INTEGER NOT NULL, acked INTEGER DEFAULT 0, lease_session TEXT, lease_token TEXT, lease_until INTEGER DEFAULT 0, response TEXT);
       CREATE TABLE IF NOT EXISTS interactions(id TEXT PRIMARY KEY, chat TEXT NOT NULL, message TEXT UNIQUE, expires INTEGER NOT NULL, state TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');`);
+    const columns = this.db.prepare("PRAGMA table_info(events)").all() as Array<{ name: string }>;
+    if (!columns.some(column => column.name === "target_session"))
+      this.db.exec("ALTER TABLE events ADD COLUMN target_session TEXT");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS schedules(
+      id TEXT PRIMARY KEY, session TEXT NOT NULL, label TEXT NOT NULL,
+      fire_at INTEGER NOT NULL, cron TEXT, timezone TEXT)`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS proxy_tokens(
+      hash TEXT PRIMARY KEY, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)`);
     this.db.exec(`INSERT OR IGNORE INTO subscriptions(session,mode,chats)
       SELECT session,'only',json_group_array(chat) FROM routes GROUP BY session`);
     this.db.exec(`INSERT OR IGNORE INTO chats(chat,type,peer)
@@ -206,6 +215,75 @@ export class Store {
       )
       .run(Date.now());
   }
+  createSchedule(session: string, label: string, fireAt?: string, cron?: string, timezone = "Asia/Shanghai") {
+    if (!this.db.prepare("SELECT id FROM sessions WHERE id=?").get(session))
+      throw new Error("Unknown destination session");
+    let fireTime = fireAt ? new Date(fireAt).getTime() : NaN;
+    if (cron) {
+      let next: Date | null;
+      try { next = new Cron(cron, { timezone }).nextRun(); }
+      catch { throw new Error("Invalid cron expression or timezone"); }
+      if (!next) throw new Error("Cron has no future occurrence");
+      if (!fireAt) fireTime = next.getTime();
+    }
+    if (!Number.isFinite(fireTime)) throw new Error("Provide a valid fire_at or cron");
+    const id = randomBytes(12).toString("hex");
+    this.db.prepare("INSERT INTO schedules(id,session,label,fire_at,cron,timezone) VALUES(?,?,?,?,?,?)")
+      .run(id, session, label, fireTime, cron ?? null, timezone);
+    return { id, session_id: session, label, fire_at: new Date(fireTime).toISOString(), cron, timezone };
+  }
+  listSchedules(session: string) {
+    return this.db.prepare("SELECT id,label,fire_at,cron,timezone FROM schedules WHERE session=? ORDER BY fire_at")
+      .all(session).map((row: any) => ({ ...row, fire_at: new Date(row.fire_at).toISOString() }));
+  }
+  deleteSchedule(session: string, id: string) {
+    return this.db.prepare("DELETE FROM schedules WHERE session=? AND id=?").run(session, id).changes > 0;
+  }
+  issueProxyToken(hash: string, expires: number) {
+    if (!/^[a-f0-9]{64}$/.test(hash) || expires <= Date.now())
+      throw new Error("Invalid proxy token registration");
+    this.db.prepare("INSERT INTO proxy_tokens(hash,expires) VALUES(?,?)").run(hash, expires);
+  }
+  proxyTokenStatus(hash: string) {
+    const row = this.db.prepare("SELECT expires,revoked FROM proxy_tokens WHERE hash=?")
+      .get(hash) as { expires: number; revoked: number } | undefined;
+    return { valid: !!row && !row.revoked && row.expires > Date.now(),
+      revoked: !!row?.revoked, expires_at: row?.expires };
+  }
+  revokeProxyToken(hash: string) {
+    return this.db.prepare("UPDATE proxy_tokens SET revoked=1 WHERE hash=? AND revoked=0")
+      .run(hash).changes > 0;
+  }
+  fireSchedules(now = Date.now()) {
+    const due = this.db.prepare("SELECT * FROM schedules WHERE fire_at<=? ORDER BY fire_at")
+      .all(now) as Array<{ id: string; session: string; label: string; fire_at: number; cron: string | null; timezone: string }>;
+    if (!due.length) return 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const schedule of due) {
+        const payload = { event: { schedule: {
+          id: schedule.id, label: schedule.label,
+          scheduled_for: new Date(schedule.fire_at).toISOString(),
+        } } };
+        this.db.prepare(`INSERT OR IGNORE INTO events(id,chat,type,payload,received,target_session)
+          VALUES(?,?,?,?,?,?)`).run(
+          `schedule:${schedule.id}:${schedule.fire_at}`, "__schedule__", "bridge.schedule.fire",
+          JSON.stringify(payload), now, schedule.session,
+        );
+        let next: Date | null = null;
+        if (schedule.cron) try {
+          next = new Cron(schedule.cron, { timezone: schedule.timezone, startAt: new Date(now) }).nextRun();
+        } catch {}
+        if (next) this.db.prepare("UPDATE schedules SET fire_at=? WHERE id=?").run(next.getTime(), schedule.id);
+        else this.db.prepare("DELETE FROM schedules WHERE id=?").run(schedule.id);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return due.length;
+  }
   ingest(raw: any): {
     id: string;
     chat: string;
@@ -273,6 +351,8 @@ export class Store {
               entry.data.currentStep ?? 0,
               true,
             );
+          if (entry.kind === "proxy_token" && value === "stop_token")
+            this.revokeProxyToken(entry.data.token_hash);
           if (card)
             response = {
               toast: {
@@ -320,12 +400,12 @@ export class Store {
     return this.db
       .prepare(
         `SELECT e.id,e.chat AS chat_id,e.type,c.type AS chat_type,c.peer AS peer_id
-         FROM events e JOIN subscriptions sub ON sub.session=?
-         JOIN sessions s ON s.id=sub.session LEFT JOIN chats c ON c.chat=e.chat
+         FROM events e JOIN sessions s ON s.id=?
+         LEFT JOIN subscriptions sub ON sub.session=s.id LEFT JOIN chats c ON c.chat=e.chat
          WHERE e.acked=0 AND s.paused=0 AND s.live=1 AND e.lease_until<=?
-           AND (sub.mode='all'
+           AND (e.target_session=s.id OR (e.target_session IS NULL AND (sub.mode='all'
              OR (sub.mode='only' AND EXISTS(SELECT 1 FROM json_each(sub.chats) WHERE value=e.chat))
-             OR (sub.mode='all_except' AND NOT EXISTS(SELECT 1 FROM json_each(sub.chats) WHERE value=e.chat)))
+             OR (sub.mode='all_except' AND NOT EXISTS(SELECT 1 FROM json_each(sub.chats) WHERE value=e.chat)))))
            ${filter} ORDER BY e.received LIMIT 100`,
       )
       .all(...params);
@@ -352,11 +432,11 @@ export class Store {
   }
   ack(session: string, id: string | undefined, receipt: string) {
     const idFilter = id ? " AND id=?" : "";
-    const row = this.db.prepare(`SELECT id,chat FROM events WHERE lease_session=?
+    const row = this.db.prepare(`SELECT id,chat,target_session FROM events WHERE lease_session=?
       AND lease_token=? AND lease_until>? AND acked=0${idFilter}`)
       .get(...(id ? [session, receipt, Date.now(), id] : [session, receipt, Date.now()])) as
-      { id: string; chat: string } | undefined;
-    if (!row || this.owner(row.chat) !== session)
+      { id: string; chat: string; target_session: string | null } | undefined;
+    if (!row || (row.target_session ?? this.owner(row.chat)) !== session)
       throw new Error("Receipt expired or event reassigned");
     const result = this.db.prepare("UPDATE events SET acked=1 WHERE id=? AND acked=0").run(row.id);
     if (!result.changes) throw new Error("Receipt expired or event reassigned");
@@ -365,12 +445,12 @@ export class Store {
     const idFilter = id ? " AND id=?" : "";
     const row: any = this.db
       .prepare(
-        `SELECT id,chat AS chat_id,type,payload,received AS received_at
+        `SELECT id,chat AS chat_id,type,payload,received AS received_at,target_session
          FROM events WHERE acked=0 AND lease_session=? AND lease_token=?
            AND lease_until>?${idFilter}`,
       )
       .get(...(id ? [session, receipt, Date.now(), id] : [session, receipt, Date.now()]));
-    if (!row || this.owner(row.chat_id) !== session)
+    if (!row || (row.target_session ?? this.owner(row.chat_id)) !== session)
       throw new Error("Receipt expired or event reassigned");
     return { ...row, payload: JSON.parse(row.payload), receipt };
   }
