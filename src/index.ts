@@ -141,6 +141,9 @@ server.tool(
       }) },
     });
     if (sent.code !== 0) throw new Error(`Could not send authorization card: ${sent.msg}`);
+    if (sent.data?.message_id)
+      await bridge.call("auth_card_register", { message_id: sent.data.message_id,
+        verification_url: result.verification_url });
     return { ...result, message_id: sent.data?.message_id };
   }),
 );

@@ -9,6 +9,7 @@ import { Store } from "./store.js";
 import { Auth } from "./auth.js";
 import { startWs } from "./ws.js";
 import { acquireWsLock } from "./ws-lock.js";
+import { patchAuthResultCard } from "./auth-card.js";
 
 const id = z.string().min(1).max(512);
 const chat = z.string().startsWith("oc_").max(512);
@@ -33,6 +34,7 @@ const schemas: Record<string, z.ZodTypeAny> = {
   token: z.object({ kind: z.enum(["tenant", "user"]) }),
   auth_status: z.object({}),
   auth_start: z.object({ scope: z.string().max(8000) }),
+  auth_card_register: z.object({ message_id: id, verification_url: z.string().url() }),
   card_register: z.object({
     id,
     chat_id: chat,
@@ -74,6 +76,27 @@ export async function serve(cfg: Config) {
   const store = new Store(cfg.stateDir),
     auth = new Auth(cfg);
   const peers = new Map<string, { socket: Socket; seen: number }>();
+  const authCards = new Map<string, string>();
+  let patchingAuthCards = false;
+  const patchAuthCards = async () => {
+    if (patchingAuthCards || !authCards.size) return;
+    patchingAuthCards = true;
+    try {
+      const flow = auth.status().oauth;
+      for (const [messageId, url] of authCards) {
+        if (flow?.verification_url === url && flow.status === 'pending') continue;
+        const status = flow?.verification_url !== url ? 'replaced' : flow.status;
+        try {
+          const token = await auth.token('tenant');
+          await patchAuthResultCard(cfg.domain, messageId, token, status === 'authorized' ? 'authorized'
+            : status === 'expired' ? 'expired' : status === 'denied_or_failed' ? 'denied_or_failed' : 'replaced');
+          authCards.delete(messageId);
+        } catch (error) {
+          process.stderr.write(`[bridge] OAuth card update failed: ${error instanceof Error ? error.message : error}\n`);
+        }
+      }
+    } finally { patchingAuthCards = false; }
+  };
   const sockets = new Set<Socket>();
   let emptySince = Date.now(),
     closing = false;
@@ -169,6 +192,12 @@ export async function serve(cfg: Config) {
           return auth.status();
         case "auth_start":
           return await auth.start(args.scope);
+        case "auth_card_register":
+          if (auth.status().oauth?.verification_url !== args.verification_url)
+            throw new Error("Authorization flow does not match the card");
+          authCards.set(args.message_id, args.verification_url);
+          void patchAuthCards();
+          return {};
         case "card_register":
           store.interaction(args);
           return {};
@@ -299,6 +328,7 @@ export async function serve(cfg: Config) {
       if (Date.now() - peer.seen > 45_000) peer.socket.destroy();
     store.expire();
     store.fireSchedules();
+    void patchAuthCards();
     notify();
     if (
       !cfg.continuous &&
