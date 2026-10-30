@@ -5,7 +5,6 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import * as lark from '@larksuiteoapi/node-sdk';
 import { getLarkClient, asUser } from '../client.js';
 import { withModuleAuth } from '../auth-guard.js';
 
@@ -74,18 +73,13 @@ async function getPrimaryCalId(): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Recurring instance helpers
+// Recurring instance IDs
 //
-// Lark uses a "lazy materialisation" model for recurring event instances:
 //   event_id ending in `_0`            → the recurring template (affects ALL future occurrences)
 //   event_id ending in `_<timestamp>`  → a specific occurrence (suffix length > 2)
 //
-// Before patching/deleting a specific occurrence, it must be materialised:
-//   POST attendees to the parent with `instance_start_time_admin=<timestamp>`
-//   This creates a distinct event record for that occurrence in Lark's DB.
-//   Then RSVP accept so the caller is an attendee (required for mutation permission).
-//
-// Without materialisation, PATCH/DELETE applies to ALL future occurrences via the template.
+// PATCH and DELETE on an occurrence create an exception automatically. A
+// cancelled occurrence can remain briefly in instance_view after DELETE.
 // ---------------------------------------------------------------------------
 
 function isRecurringInstance(id: string): boolean {
@@ -97,37 +91,6 @@ function getParentId(id: string): string {
   const parts = id.split('_');
   parts[parts.length - 1] = '0';
   return parts.join('_');
-}
-
-function getInstanceTimestamp(id: string): string {
-  return id.split('_').pop()!;
-}
-
-async function getMyOpenId(): Promise<string> {
-  const client = getLarkClient();
-  const res = await (client.authen as any).userInfo.get({}, await asUser());
-  return res.data?.open_id ?? res.data?.user_info?.open_id;
-}
-
-async function materializeInstance(calId: string, instanceId: string): Promise<void> {
-  const openId = await getMyOpenId();
-  if (!openId) throw new Error('Could not resolve caller open_id for recurring instance materialisation');
-  const parentId = getParentId(instanceId);
-  const timestamp = getInstanceTimestamp(instanceId);
-  const client = getLarkClient();
-  await (client.calendar.calendarEventAttendee as any).create({
-    path: { calendar_id: calId, event_id: parentId },
-    params: { user_id_type: 'open_id' },
-    data: {
-      attendees: [{ type: 'user', is_optional: false, user_id: openId }],
-      need_notification: false,
-      instance_start_time_admin: timestamp,
-    },
-  }, await asUser());
-  await (client.calendar.calendarEvent as any).reply({
-    path: { calendar_id: calId, event_id: instanceId },
-    data: { rsvp_status: 'accept' },
-  }, await asUser());
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +327,7 @@ export function registerCalendarTools(server: McpServer) {
   // ── patch ──────────────────────────────────────────────────────────────────
   server.tool(
     'feishu_calendar_patch',
-    'Update a calendar event. Handles recurring instance materialisation automatically.',
+    'Update a calendar event, including one occurrence of a recurring event.',
     {
       event_id:    z.string().describe('Event ID to update'),
       summary:     z.string().optional(),
@@ -378,8 +341,6 @@ export function registerCalendarTools(server: McpServer) {
     },
     async (p) => withModuleAuth('calendar', async () => {
       const calId = await getPrimaryCalId();
-      if (isRecurringInstance(p.event_id)) await materializeInstance(calId, p.event_id);
-
       const data: any = {};
       if (p.summary     != null) data.summary     = p.summary;
       if (p.description != null) data.description = p.description;
@@ -416,15 +377,13 @@ export function registerCalendarTools(server: McpServer) {
   // ── delete ─────────────────────────────────────────────────────────────────
   server.tool(
     'feishu_calendar_delete',
-    'Delete a calendar event. Handles recurring instance materialisation automatically.',
+    'Delete a calendar event or one occurrence of a recurring event.',
     {
       event_id: z.string().describe('Event ID to delete'),
       notify:   z.boolean().default(false).optional().describe('Send cancellation notification to attendees'),
     },
     async (p) => withModuleAuth('calendar', async () => {
       const calId = await getPrimaryCalId();
-      if (isRecurringInstance(p.event_id)) await materializeInstance(calId, p.event_id);
-
       const client = getLarkClient();
       const res = await (client.calendar.calendarEvent as any).delete({
         path: { calendar_id: calId, event_id: p.event_id },
