@@ -189,12 +189,15 @@ export function registerCardTools(server: McpServer) {
   );
   server.tool(
     "feishu_im_send_progress",
-    "Send a progress card with a Stop button; clicks are delivered to the chat-assigned session.",
+    "Send a progress card with a Stop button; clicks are delivered to the chat-assigned session. Steps can include a short detail distinct from the label, including for future steps.",
     {
       receive_id: common.receive_id,
       title: z.string(),
       steps: z
-        .array(z.object({ label: z.string(), detail: z.string().optional() }))
+        .array(z.object({
+          label: z.string(),
+          detail: z.string().optional().describe("Short explanation shown when this step is expanded; do not repeat the label"),
+        }))
         .min(1),
       current_step: z.number().int().min(0).default(0),
     },
