@@ -135,14 +135,14 @@ The script validates app authentication, waits for the WebSocket to connect, and
 
 ## Codex delivery adapter
 
-`node scripts/codex-adapter.mjs` registers the current Codex thread as a broker session using `LARK_BRIDGE_SESSION_ID`, `CODEX_THREAD_ID`, or `CODEX_SESSION_ID`. Give it the same private Lark config as the broker. Subscribe a chat with `node scripts/bridge-events.mjs assign --session <THREAD_ID> <CHAT_ID>`. The broker releases each session's pending batch after five seconds without a new event or immediately when six are pending. A drain request does not reset that clock; an empty queue returns immediately. While the session is idle, the adapter queues one compact batch with `codex queue --thread <THREAD_ID>` and acknowledges it after Codex accepts the queue request. The agent does not handle delivery receipts.
+`node scripts/codex-adapter.mjs` registers the current Codex thread as a broker session using `LARK_BRIDGE_SESSION_ID`, `CODEX_THREAD_ID`, or `CODEX_SESSION_ID`. Give it the same private Lark config as the broker. Subscribe a chat with `node scripts/bridge-events.mjs assign --session <THREAD_ID> <CHAT_ID>`. The broker makes each session's pending batch ready after five seconds without a new event or immediately when six are pending. A drain request does not reset that clock; an empty queue returns immediately. As soon as a batch is ready, the adapter queues it as one compact message with `codex queue --thread <THREAD_ID>` if the session is idle. That queue delivery reserves the session until its `Stop` hook runs, so another ready batch remains available to the hooks instead of being queued separately. The adapter acknowledges events after Codex accepts the queue request and releases its claim if delivery fails. The agent does not handle delivery receipts.
 
 When project hooks are trusted, `UserPromptSubmit` marks the session active.
-`PostToolUse` drains a ready batch into the current turn's next model step;
-`Stop` checks again before ending the turn. The adapter claims events only
-while the session is idle. Set `postToolInjection` to `false` in the private
-Lark config to disable these hooks and keep idle-adapter delivery. A progress
-card update can also drain ready messages when passed `session_id`.
+`PostToolUse` can drain a ready batch into the current turn's next model step;
+`Stop` always checks again before ending the turn and releases the session for
+the next idle delivery. Set `postToolInjection` to `false` in the private Lark
+config to disable only the optional `PostToolUse` injection. A progress card
+update can also drain ready messages when passed `session_id`.
 
 Codex loads the outbound MCP tools from this repository's `.codex/config.toml`.
 

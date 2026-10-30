@@ -57,6 +57,7 @@ const schemas: Record<string, z.ZodTypeAny> = {
   drain_for: z.object({ session_id: id, limit: z.number().int().min(1).max(100).default(100),
     consumer: z.enum(["hook", "adapter", "progress"]) }),
   session_activity: z.object({ session_id: id, active: z.boolean() }),
+  queue_failed: z.object({ session_id: id, receipts: z.array(id) }),
   ack_for: z.object({ session_id: id, id: id.optional(), receipt: id }),
   raw_for: z.object({ session_id: id, id: id.optional(), receipt: id }),
   status: z.object({}),
@@ -80,17 +81,20 @@ export async function serve(cfg: Config) {
     auth = new Auth(cfg);
   const peers = new Map<string, { socket: Socket; seen: number }>();
   const activeSessions = new Set<string>();
+  // A successful adapter claim reserves the idle turn until its Stop hook runs.
+  const queuedSessions = new Set<string>();
   const batchWaiters = new Set<() => void>();
   const wakeBatchWaiters = () => { for (const wake of batchWaiters) wake(); };
   const drainReady = async (sessionId: string, limit: number, consumer: string) => {
     while (!closing) {
-      if (consumer === "adapter" && activeSessions.has(sessionId)) return [];
+      if (consumer === "adapter" && (activeSessions.has(sessionId) || queuedSessions.has(sessionId))) return [];
       const pending = store.pending(sessionId) as Array<{ received: number }>;
       if (!pending.length) return [];
       const latest = Math.max(...pending.map(event => event.received));
       const remaining = 5000 - (Date.now() - latest);
       if (pending.length >= 6 || remaining <= 0) {
         const events = store.claim(sessionId, limit);
+        if (consumer === "adapter" && events.length) queuedSessions.add(sessionId);
         wakeBatchWaiters();
         return events;
       }
@@ -211,8 +215,18 @@ export async function serve(cfg: Config) {
           return await drainReady(args.session_id, args.limit, args.consumer);
         case "session_activity":
           if (args.active) activeSessions.add(args.session_id);
-          else { activeSessions.delete(args.session_id); notify(); }
+          else {
+            activeSessions.delete(args.session_id);
+            queuedSessions.delete(args.session_id);
+            notify();
+          }
           wakeBatchWaiters();
+          return {};
+        case "queue_failed":
+          store.release(args.session_id, args.receipts);
+          queuedSessions.delete(args.session_id);
+          wakeBatchWaiters();
+          notify();
           return {};
         case "ack_for":
           store.ack(args.session_id, args.id, args.receipt);
@@ -316,6 +330,7 @@ export async function serve(cfg: Config) {
         peers.delete(session);
         store.disconnect(session);
         activeSessions.delete(session);
+        queuedSessions.delete(session);
         wakeBatchWaiters();
         if (!peers.size) emptySince = Date.now();
       }

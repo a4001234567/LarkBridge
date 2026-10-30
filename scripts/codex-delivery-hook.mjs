@@ -11,7 +11,8 @@ const input = JSON.parse(readFileSync(0, 'utf8'));
 const thread = input.session_id;
 if (typeof thread !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(thread)) throw new Error('Invalid session_id');
 const cfg = config();
-if (!cfg.postToolInjection) process.exit(0);
+// PostToolUse is optional; Stop and UserPromptSubmit maintain delivery ownership.
+if (action === 'after-tool' && !cfg.postToolInjection) process.exit(0);
 const bridge = new Bridge(cfg, { session_id: `hook-${process.pid}`, name: 'Codex delivery hook', harness: 'hook' });
 setBridge(bridge);
 try {

@@ -116,6 +116,41 @@ test("broker drains on message count or latest-arrival quiet time, with one owne
     await adapter.call("ack_for", { session_id: "batch-session", id: event.id, receipt: event.receipt });
 });
 
+test("a ready batch queues only once while Codex is busy, then hooks consume later batches", async (t) => {
+  const dir = temporary(t);
+  const cfg: Config = { appId: "queue-reservation", stateDir: dir, socket: join(dir, "broker.sock"),
+    domain: "https://open.feishu.cn", offline: true, continuous: true, graceMs: 1000 };
+  const broker = await serve(cfg);
+  t.after(() => broker.close());
+  const adapter = new Bridge(cfg, { session_id: "thread", name: "thread", harness: "codex" });
+  const hook = new Bridge(cfg, { session_id: "hook-reservation", name: "hook", harness: "hook" });
+  t.after(() => { adapter.close(); hook.close(); });
+  await adapter.open(false);
+  await hook.open(false);
+  await adapter.call("route", { session_id: "thread", chat_id: "oc_chat" });
+  const ingest = (start: number) => {
+    for (let i = start; i < start + 6; i++) broker.store.ingest({ ...message,
+      header: { ...message.header, event_id: `reservation-${i}` } });
+  };
+  ingest(0);
+  const first = await adapter.call("drain_for", { session_id: "thread", consumer: "adapter" });
+  assert.equal(first.length, 6);
+  ingest(6);
+  assert.deepEqual(await adapter.call("drain_for", { session_id: "thread", consumer: "adapter" }), []);
+  const second = await hook.call("drain_for", { session_id: "thread", consumer: "hook" });
+  assert.deepEqual(second.map((event: any) => event.id), Array.from({ length: 6 }, (_, i) => `reservation-${i + 6}`));
+  for (const event of second) await hook.call("ack_for", { session_id: "thread", id: event.id, receipt: event.receipt });
+  await adapter.call("queue_failed", { session_id: "thread", receipts: first.map((event: any) => event.receipt) });
+  const retry = await adapter.call("drain_for", { session_id: "thread", consumer: "adapter" });
+  assert.deepEqual(retry.map((event: any) => event.id), first.map((event: any) => event.id));
+  for (const event of retry) await adapter.call("ack_for", { session_id: "thread", id: event.id, receipt: event.receipt });
+  ingest(12);
+  assert.deepEqual(await adapter.call("drain_for", { session_id: "thread", consumer: "adapter" }), []);
+  await hook.call("session_activity", { session_id: "thread", active: false });
+  const third = await adapter.call("drain_for", { session_id: "thread", consumer: "adapter" });
+  assert.equal(third.length, 6);
+});
+
 test("post-tool hook injects one compact batch and acknowledges it", { timeout: 10000 }, async (t) => {
   const dir = temporary(t), configPath = join(dir, "config.json");
   const cfg: Config = { appId: "hook-offline", stateDir: dir, socket: join(dir, "broker.sock"),
@@ -143,6 +178,35 @@ test("post-tool hook injects one compact batch and acknowledges it", { timeout: 
   assert.equal(output.hookSpecificOutput.hookEventName, "PostToolUse");
   assert.match(output.hookSpecificOutput.additionalContext, /Lark \(reply via Lark tools\):/);
   assert.equal((await adapter.call("fetch_for", { session_id: "hook-thread" })).length, 0);
+});
+
+test("Stop still drains ready messages when optional post-tool injection is disabled", { timeout: 10000 }, async (t) => {
+  const dir = temporary(t), configPath = join(dir, "config.json");
+  const cfg: Config = { appId: "stop-offline", stateDir: dir, socket: join(dir, "broker.sock"),
+    domain: "https://open.feishu.cn", offline: true, continuous: true, graceMs: 1000 };
+  writeFileSync(configPath, JSON.stringify({ appId: cfg.appId, stateDir: dir, postToolInjection: false }));
+  const broker = await serve(cfg);
+  t.after(() => broker.close());
+  const adapter = new Bridge(cfg, { session_id: "stop-thread", name: "stop thread", harness: "codex" });
+  t.after(() => adapter.close());
+  await adapter.open(false);
+  await adapter.call("route", { session_id: "stop-thread", chat_id: "oc_chat" });
+  for (let i = 0; i < 6; i++) broker.store.ingest({ ...message,
+    header: { ...message.header, event_id: `stop-${i}` } });
+  const child = spawn(process.execPath, [resolve("scripts/codex-delivery-hook.mjs"), "stop"], {
+    env: { ...process.env, LARK_BRIDGE_CONFIG: configPath, LARK_BRIDGE_OFFLINE: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  child.stdin.end(JSON.stringify({ session_id: "stop-thread" }));
+  let stdout = "", stderr = "";
+  child.stdout.on("data", chunk => { stdout += chunk; });
+  child.stderr.on("data", chunk => { stderr += chunk; });
+  const [code] = await once(child, "close");
+  assert.equal(code, 0, stderr);
+  const output = JSON.parse(stdout);
+  assert.equal(output.decision, "block");
+  assert.match(output.reason, /Lark \(reply via Lark tools\):/);
+  assert.equal((await adapter.call("fetch_for", { session_id: "stop-thread" })).length, 0);
 });
 
 test("client retries broker launch while a previous startup lock is held", { timeout: 25000 }, async (t) => {

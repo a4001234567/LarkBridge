@@ -46,15 +46,26 @@ export class CodexNotifier {
     if (this.active) { this.flushAfterCurrent = true; return; }
     this.active = true;
     let events: ClaimedEvent[] = [];
+    let sent = false;
     try {
       events = await this.bridge.call('drain_for', { session_id: this.thread, limit: 100, consumer: 'adapter' });
       if (!events.length) { this.seen.clear(); return; }
       const shown = await this.enrich(events);
       await this.queue(this.thread, `Lark (reply via Lark tools):\n${formatEvents(shown)}`);
+      sent = true;
       for (const event of events)
         await this.bridge.call('ack_for', { session_id: this.thread, id: event.id, receipt: event.receipt });
     } catch (error) {
       process.stderr.write(`[bridge] Codex delivery failed: ${error instanceof Error ? error.message : error}\n`);
+      if (events.length && !sent) {
+        try {
+          await this.bridge.call('queue_failed', {
+            session_id: this.thread, receipts: events.map(event => event.receipt),
+          });
+        } catch (releaseError) {
+          process.stderr.write(`[bridge] Codex delivery release failed: ${releaseError instanceof Error ? releaseError.message : releaseError}\n`);
+        }
+      }
     } finally {
       for (const event of events) this.seen.delete(event.id);
       this.active = false;

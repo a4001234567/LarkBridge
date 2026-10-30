@@ -7,7 +7,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 test('mediator queues event content and acknowledges only after delivery succeeds', async () => {
-  const sent: string[] = [], acknowledged: string[] = [];
+  const sent: string[] = [], acknowledged: string[] = [], released: string[] = [];
   const event = {
     id: 'event-1', chat_id: 'oc_private', chat_type: 'p2p', peer_id: 'ou_user',
     type: 'im.message.receive_v1', received_at: Date.parse('2026-10-17T06:00:00Z'), receipt: 'private-lease',
@@ -20,6 +20,7 @@ test('mediator queues event content and acknowledges only after delivery succeed
       assert.equal(args.session_id, 'thread-id');
       if (method === 'drain_for') return acknowledged.length ? [] : [event];
       if (method === 'ack_for') { acknowledged.push(args.id); return {}; }
+      if (method === 'queue_failed') { released.push(...args.receipts); return {}; }
       throw new Error(`Unexpected ${method}`);
     }
   }
@@ -33,6 +34,7 @@ test('mediator queues event content and acknowledges only after delivery succeed
   bridge.emit('notice', { events: [event] });
   await tick();
   assert.deepEqual(acknowledged, []);
+  assert.deepEqual(released, ['private-lease']);
   bridge.emit('notice', { events: [event] });
   await tick();
   assert.deepEqual(acknowledged, ['event-1']);

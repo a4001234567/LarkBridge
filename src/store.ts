@@ -432,6 +432,12 @@ export class Store {
       };
     });
   }
+  release(session: string, receipts: string[]) {
+    const release = this.db.prepare(`UPDATE events
+      SET lease_session=NULL,lease_token=NULL,lease_until=0
+      WHERE lease_session=? AND lease_token=? AND acked=0`);
+    for (const receipt of receipts) release.run(session, receipt);
+  }
   ack(session: string, id: string | undefined, receipt: string) {
     const idFilter = id ? " AND id=?" : "";
     const row = this.db.prepare(`SELECT id,chat,target_session FROM events WHERE lease_session=?
