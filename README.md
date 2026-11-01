@@ -97,6 +97,7 @@ The WebSocket adapter accepts configured event types generically and keeps their
 - Original `feishu_im_send`: plain text, rich posts, interactive cards, image/file uploads, and message replies.
 - Original read, resource-download, and message-search tools from `tools/im.ts`; search obtains a user token from the broker.
 - People search, calendar, task, document, and wiki tools from Yet Another Lark MCP. User-authenticated SDK calls and direct HTTPS calls obtain tokens through the broker.
+- `feishu_doc_append` accepts exactly one of `blocks` (an ordered array of the original block options, created in batches of up to 50) or `markdown` (convert and append up to 1000 nested blocks in one request). Markdown conversion and insertion use the broker's user OAuth token; Markdown image links are not uploaded automatically.
 - `feishu_auth_whoami` and `feishu_auth_issue_token`. The latter starts a local HTTP proxy, sends a monitoring card, and registers its Stop button with the broker for immediate revocation.
 - `feishu_schedule_create`, `feishu_schedule_list`, and `feishu_schedule_delete`. Reminders persist in the broker and are delivered to a specific agent session without a chat subscription; pass `session_id` when the tool's own MCP process has a separate identity.
 - `feishu_im_send_confirm` and `feishu_im_send_form`: original card builders, default asynchronous delivery, optional blocking result.

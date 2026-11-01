@@ -318,6 +318,7 @@ test(
       "feishu_task_list",
       "feishu_doc_search",
       "feishu_doc_fetch",
+      "feishu_doc_append",
       "feishu_wiki_list_spaces",
       "feishu_schedule_create",
       "feishu_schedule_list",
@@ -325,6 +326,19 @@ test(
       "feishu_auth_issue_token",
     ])
       assert.ok(tools.tools.some((x) => x.name === name));
+    const appendSchema: any = tools.tools.find((x) => x.name === "feishu_doc_append")?.inputSchema;
+    assert.ok(appendSchema.properties.blocks);
+    assert.ok(appendSchema.properties.markdown);
+    assert.equal(appendSchema.properties.block, undefined);
+    assert.equal(appendSchema.properties.text, undefined);
+    for (const arguments_ of [
+      { document_id: "doc", blocks: [{ text: "one" }], markdown: "# two" },
+      { document_id: "doc" },
+    ]) {
+      const invalid: any = await b.callTool({ name: "feishu_doc_append", arguments: arguments_ });
+      assert.equal(invalid.isError, true);
+      assert.match(invalid.content[0].text, /exactly one of blocks or markdown/);
+    }
     await a.close();
     assert.equal((await status(b)).pid, pid);
     await b.callTool({

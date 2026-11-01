@@ -9,6 +9,8 @@ import { createReadStream, statSync } from 'fs';
 import { getLarkClient, asUser, withAuth, getUserToken, getTenantAccessToken } from '../client.js';
 import { getBridge } from '../bridge.js';
 import { withModuleAuth } from '../auth-guard.js';
+import { prepareMarkdownDescendants } from './docs-markdown.js';
+import { toLarkAppendBlock } from './docs-blocks.js';
 
 // Default wiki space (set via LARK_WIKI_SPACE env var)
 const DEFAULT_WIKI_SPACE_ID = process.env.LARK_WIKI_SPACE || '';
@@ -112,7 +114,12 @@ export function registerDocTools(server: McpServer) {
           const elems = b[k]?.elements;
           if (elems) { text = elems.map((e: any) => e.text_run?.content ?? e.equation?.content ?? '').join(''); break; }
         }
-        return { block_id: b.block_id, type: typeName, text: text.slice(0, 80) };
+        return {
+          block_id: b.block_id,
+          type: typeName,
+          text: text.slice(0, 80),
+          ...(typeName === 'todo' ? { done: Boolean(b.todo?.style?.done) } : {}),
+        };
       });
 
       return { document_id, content: rawRes.data?.content, blocks };
@@ -143,16 +150,12 @@ export function registerDocTools(server: McpServer) {
       if (italic)      style.italic      = true;
       if (inline_code) style.inline_code = true;
 
-      // patch uses update_text_elements (replaces all inline elements of the block)
-      const updateData: any = {
-        update_text_elements: {
-          elements: [{ text_run: { content: text, text_element_style: style } }],
-        },
-      };
-      // For todo: also update the done state via update_text_style
-      if (done !== undefined) {
-        updateData.update_text_style = { done };
-      }
+      const elements = [{ text_run: { content: text, text_element_style: style } }];
+      // The API accepts one update operation per request. update_text changes
+      // both the elements and the todo style; field 2 selects `done`.
+      const updateData: any = done === undefined
+        ? { update_text_elements: { elements } }
+        : { update_text: { elements, style: { done }, fields: [2] } };
 
       const res = await (client as any).docx.v1.documentBlock.patch({
         path: { document_id, block_id },
@@ -252,20 +255,16 @@ export function registerDocTools(server: McpServer) {
     }),
   );
 
-  // ── update (append block) ─────────────────────────────────────────────────
-  const BLOCK_TYPES: Record<string, number> = {
-    paragraph: 2,
-    heading1: 3, heading2: 4, heading3: 5, heading4: 6, heading5: 7, heading6: 8,
-    bullet: 12, ordered: 13, code: 14, quote: 15, todo: 17,
-  };
-
+  // ── update (append blocks) ────────────────────────────────────────────────
   server.tool(
     'feishu_doc_append',
     [
-      'Append a block to an existing Lark document.',
+      'Append to an existing Lark document. Supply exactly one of blocks or markdown.',
       '',
-      'type options: paragraph (default), heading1–heading6, bullet, ordered, code, quote, todo, callout, equation, image',
-      'For bullet/ordered/todo lists, call once per item.',
+      'blocks: append one or more blocks using the existing formatting options, in order.',
+      'markdown: convert Markdown into nested Lark blocks and append them in one batch (up to 1000 blocks).',
+      'Block type options: paragraph (default), heading1–heading6, bullet, ordered, code, quote, todo, callout, equation, image.',
+      'For bullet/ordered/todo lists, provide one array item per list item.',
       'bold/italic/inline_code apply inline style to the entire text.',
       'done: only for todo — marks checkbox as checked (default false).',
       'image_path: only for image — local file path to upload (png/jpg/gif/webp).',
@@ -274,18 +273,24 @@ export function registerDocTools(server: McpServer) {
     ].join('\n'),
     {
       document_id: z.string().describe('Document token/ID'),
-      text:        z.string().optional().describe('Text content (not used for image type)'),
-      type:        z.enum(['paragraph','heading1','heading2','heading3','heading4','heading5','heading6','bullet','ordered','code','quote','todo','callout','equation','image'])
+      blocks: z.array(z.object({
+        text:        z.string().optional().describe('Text content (not used for image type)'),
+        type:        z.enum(['paragraph','heading1','heading2','heading3','heading4','heading5','heading6','bullet','ordered','code','quote','todo','callout','equation','image'])
                      .default('paragraph').optional(),
-      bold:        z.boolean().optional(),
-      italic:      z.boolean().optional(),
-      inline_code: z.boolean().optional(),
-      done:        z.boolean().optional().describe('For todo blocks only — mark checkbox as checked'),
-      image_path:  z.string().optional().describe('For image blocks — absolute local file path to upload'),
-      callout_emoji: z.string().optional().describe('For callout blocks — Unicode hex codepoint e.g. "1f4a1"=💡 "26a0"=⚠️ "2705"=✅ "1f525"=🔥 "1f4cc"=📌'),
-      callout_bg:    z.number().int().min(1).max(7).optional().describe('For callout blocks — background color: 1=LightRed 2=LightOrange 3=LightYellow 4=LightGreen 5=LightBlue 6=LightPurple 7=LightGray'),
+        bold:        z.boolean().optional(),
+        italic:      z.boolean().optional(),
+        inline_code: z.boolean().optional(),
+        done:        z.boolean().optional().describe('For todo blocks only — mark checkbox as checked'),
+        image_path:  z.string().optional().describe('For image blocks — absolute local file path to upload'),
+        callout_emoji: z.string().optional().describe('For callout blocks — Unicode hex codepoint e.g. "1f4a1"=💡'),
+        callout_bg:    z.number().int().min(1).max(7).optional().describe('For callout blocks — background color 1–7'),
+      })).min(1).optional().describe('Existing block format, now as a batch of one or more blocks'),
+      markdown: z.string().min(1).optional().describe('Markdown batch append mode; mutually exclusive with blocks'),
     },
-    async ({ document_id, text = '', type = 'paragraph', bold, italic, inline_code, done, image_path, callout_emoji, callout_bg }) => withModuleAuth('docs', async () => {
+    async ({ document_id, blocks, markdown }) => {
+      if ((blocks === undefined) === (markdown === undefined))
+        throw new Error('Provide exactly one of blocks or markdown');
+      return withModuleAuth('docs', async () => {
       const client = getLarkClient();
       const docRes = await (client as any).docx.v1.document.get(
         { path: { document_id } }, await asUser(),
@@ -293,153 +298,93 @@ export function registerDocTools(server: McpServer) {
       if (docRes.code !== 0) throw new Error(`Get doc error ${docRes.code}: ${docRes.msg}`);
       const blockId = docRes.data?.document?.body?.block_id ?? document_id;
 
-      // ── image block (3-step) ─────────────────────────────────────────────────
-      if (type === 'image') {
-        if (!image_path) throw new Error('image_path is required for image blocks');
-
-        // Step 1: create empty image block → get Image BlockID
-        const createRes = await (client as any).docx.v1.documentBlockChildren.create({
+      if (markdown !== undefined) {
+        const converted = await (client as any).docx.v1.document.convert({
+          data: { content_type: 'markdown', content: markdown },
+        }, await asUser());
+        if (converted.code !== 0) throw new Error(`Markdown conversion error ${converted.code}: ${converted.msg}`);
+        const data = prepareMarkdownDescendants(converted.data);
+        const res = await (client as any).docx.v1.documentBlockDescendant.create({
           path: { document_id, block_id: blockId },
           params: { document_revision_id: -1 },
-          data: { children: [{ block_type: 27, image: {} }], index: -1 },
+          data,
         }, await asUser());
-        const createCode = createRes?.code ?? createRes?.data?.code;
-        if (createCode !== 0 && createCode !== undefined) throw new Error(`Create image block error ${createCode}: ${createRes?.msg ?? createRes?.data?.msg}`);
-        const imageBlockId = createRes?.data?.children?.[0]?.block_id;
-        if (!imageBlockId) throw new Error('Create image block returned no block_id');
-
-        // Step 2: upload image using Image BlockID as parent_node
-        const fileSize = statSync(image_path).size;
-        const uploadRes = await (client as any).drive.v1.media.uploadAll({
-          data: {
-            file_name: image_path.split('/').pop() ?? 'image.png',
-            parent_type: 'docx_image',
-            parent_node: imageBlockId,
-            size: fileSize,
-            file: createReadStream(image_path),
-          },
-        }, await asUser());
-        const fileToken = uploadRes?.data?.file_token ?? uploadRes?.file_token;
-        if (!fileToken) throw new Error(`Image upload failed: ${JSON.stringify(uploadRes)}`);
-
-        // Step 3: PATCH image block with replace_image to set the token
-        const patchRes = await (client as any).docx.v1.documentBlock.patch({
-          path: { document_id, block_id: imageBlockId },
-          params: { document_revision_id: -1 },
-          data: { replace_image: { token: fileToken } },
-        }, await asUser());
-        const patchCode = patchRes?.code ?? patchRes?.data?.code;
-        if (patchCode !== 0 && patchCode !== undefined) throw new Error(`Set image token error ${patchCode}: ${patchRes?.msg ?? patchRes?.data?.msg}`);
-        return { ok: true, document_id, appended: true, type: 'image' };
+        if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+        return { ok: true, document_id, appended: true, mode: 'markdown',
+          blocks_created: data.descendants.length,
+          block_ids: (res.data?.children ?? []).map((item: any) => item.block_id) };
       }
 
-      // ── equation block (paragraph with inline equation element) ─────────────
-      if (type === 'equation') {
-        const latex = text.endsWith('\n') ? text : text + '\n';
-        const res = await (client as any).docx.v1.documentBlockChildren.create({
-          path: { document_id, block_id: blockId },
-          params: { document_revision_id: -1 },
-          data: {
-            children: [{ block_type: 2, text: {
-              elements: [{ equation: { content: latex, text_element_style: {} } }],
-              style: { align: 1, folded: false },
-            }}],
-            index: -1,
-          },
-        }, await asUser());
-        const resCode = res?.code ?? res?.data?.code;
-        if (resCode !== 0 && resCode !== undefined) throw new Error(`Lark API ${resCode}: ${res?.msg ?? res?.data?.msg}`);
-        return { ok: true, document_id, appended: true, type: 'equation' };
-      }
-
-      // ── callout block (2-step container) ────────────────────────────────────
-      if (type === 'callout') {
-        // Step 1: create the callout container block
-        // style fields go directly on callout object (no 'style' wrapper)
-        const calloutData: any = {};
-        if (callout_emoji) calloutData.emoji_id = callout_emoji;
-        if (callout_bg)    calloutData.background_color = callout_bg;
-        const createRes = await (client as any).docx.v1.documentBlockChildren.create({
-          path: { document_id, block_id: blockId },
-          params: { document_revision_id: -1 },
-          data: { children: [{ block_type: 19, callout: calloutData }], index: -1 },
-        }, await asUser());
-        const createCode = createRes?.code ?? createRes?.data?.code;
-        if (createCode !== 0 && createCode !== undefined) throw new Error(`Create callout error ${createCode}: ${createRes?.msg ?? createRes?.data?.msg}`);
-        const calloutBlockId = createRes?.data?.children?.[0]?.block_id;
-        if (!calloutBlockId) throw new Error('Create callout returned no block_id');
-
-        // Step 2: insert text paragraph inside the callout
-        const inlineStyle: any = {};
-        if (bold)        inlineStyle.bold        = true;
-        if (italic)      inlineStyle.italic      = true;
-        if (inline_code) inlineStyle.inline_code = true;
-        const innerRes = await (client as any).docx.v1.documentBlockChildren.create({
-          path: { document_id, block_id: calloutBlockId },
-          params: { document_revision_id: -1 },
-          data: { children: [{ block_type: 2, text: { elements: [{ text_run: { content: text, text_element_style: inlineStyle } }], style: {} } }], index: 0 },
-        }, await asUser());
-        const innerCode = innerRes?.code ?? innerRes?.data?.code;
-        if (innerCode !== 0 && innerCode !== undefined) throw new Error(`Insert callout text error ${innerCode}: ${innerRes?.msg ?? innerRes?.data?.msg}`);
-        return { ok: true, document_id, appended: true, type: 'callout' };
-      }
-
-      // ── text-based blocks ────────────────────────────────────────────────────
-      const block_type = BLOCK_TYPES[type] ?? 2;
-      const style: any = {};
-      if (bold)        style.bold        = true;
-      if (italic)      style.italic      = true;
-      if (inline_code) style.inline_code = true;
-
-      const BLOCK_KEY: Record<string, string> = {
-        paragraph: 'text',
-        heading1: 'heading1', heading2: 'heading2', heading3: 'heading3',
-        heading4: 'heading4', heading5: 'heading5', heading6: 'heading6',
-        bullet: 'bullet', ordered: 'ordered', code: 'code', quote: 'quote',
-        todo: 'todo',
-      };
-      const blockKey = BLOCK_KEY[type] ?? 'text';
-
-      // Parse $...$ as inline equations for paragraph/heading types.
-      // Splits text on $...$ tokens and builds a mixed elements array.
-      function buildElements(raw: string, textStyle: any): any[] {
-        const parts = raw.split(/(\$[^$]+\$)/g);
-        return parts
-          .filter(p => p.length > 0)
-          .map(p => {
-            if (p.startsWith('$') && p.endsWith('$') && p.length > 2) {
-              const latex = p.slice(1, -1);
-              return { equation: { content: latex + '\n', text_element_style: {} } };
+      {
+        // Create up to 50 top-level blocks per request. Special blocks are
+        // finalized after creation, while their position remains in the batch.
+        for (const item of blocks!)
+          if (item.type === 'image') {
+            if (!item.image_path) throw new Error('image_path is required for image blocks');
+            statSync(item.image_path);
+          }
+        const blockIds: string[] = [];
+        let lastEdit = 0;
+        const paceEdit = async () => {
+          const delay = lastEdit + 350 - Date.now();
+          if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+          lastEdit = Date.now();
+        };
+        const write = async (parentId: string, children: any[], index = -1) => {
+          await paceEdit();
+          const res = await (client as any).docx.v1.documentBlockChildren.create({
+            path: { document_id, block_id: parentId },
+            params: { document_revision_id: -1 },
+            data: { children, index },
+          }, await asUser());
+          if (res.code !== 0) throw new Error(`Lark API ${res.code}: ${res.msg}`);
+          return res.data?.children ?? [];
+        };
+        try {
+          for (let offset = 0; offset < blocks!.length; offset += 50) {
+            const batch = blocks!.slice(offset, offset + 50);
+            const created = await write(blockId, batch.map(toLarkAppendBlock));
+            if (created.length !== batch.length) throw new Error('Lark returned an incomplete block batch');
+            blockIds.push(...created.map((item: any) => item.block_id));
+            for (let i = 0; i < batch.length; i++) {
+              const item = batch[i], createdId = created[i].block_id;
+              if (item.type === 'image') {
+                const imagePath = item.image_path!;
+                const uploadRes = await (client as any).drive.v1.media.uploadAll({ data: {
+                  file_name: imagePath.split('/').pop() ?? 'image.png',
+                  parent_type: 'docx_image', parent_node: createdId,
+                  size: statSync(imagePath).size, file: createReadStream(imagePath),
+                } }, await asUser());
+                const token = uploadRes?.data?.file_token ?? uploadRes?.file_token;
+                if (!token) throw new Error(`Image upload failed for block ${createdId}`);
+                await paceEdit();
+                const patchRes = await (client as any).docx.v1.documentBlock.patch({
+                  path: { document_id, block_id: createdId },
+                  params: { document_revision_id: -1 },
+                  data: { replace_image: { token } },
+                }, await asUser());
+                if (patchRes.code !== 0) throw new Error(`Set image token error ${patchRes.code}: ${patchRes.msg}`);
+              } else if (item.type === 'callout') {
+                const style: any = {};
+                if (item.bold) style.bold = true;
+                if (item.italic) style.italic = true;
+                if (item.inline_code) style.inline_code = true;
+                await write(createdId, [{ block_type: 2, text: {
+                  elements: [{ text_run: { content: item.text ?? '', text_element_style: style } }], style: {},
+                } }], 0);
+              }
             }
-            return { text_run: { content: p, text_element_style: textStyle } };
-          });
+          }
+        } catch (error) {
+          throw new Error(`Batch append may be partial; created block IDs: ${blockIds.join(', ') || 'none'}. ${String(error)}`);
+        }
+        return { ok: true, document_id, appended: true, mode: 'blocks',
+          blocks_created: blockIds.length, block_ids: blockIds };
       }
 
-      const supportsInlineEq = type === 'paragraph' || type.startsWith('heading');
-      const elements = supportsInlineEq
-        ? buildElements(text, style)
-        : [{ text_run: { content: text, text_element_style: style } }];
 
-      const blockContent: any = { elements };
-      if (type === 'paragraph' || type.startsWith('heading')) {
-        blockContent.style = {};
-      }
-      if (type === 'todo') {
-        blockContent.style = { done: done ?? false };
-      }
-
-      const res = await (client as any).docx.v1.documentBlockChildren.create({
-        path: { document_id, block_id: blockId },
-        params: { document_revision_id: -1 },
-        data: {
-          children: [{ block_type, [blockKey]: blockContent }],
-          index: -1,
-        },
-      }, await asUser());
-      const resCode = res?.code ?? res?.data?.code;
-      if (resCode !== 0 && resCode !== undefined) throw new Error(`Lark API ${resCode}: ${res?.msg ?? res?.data?.msg} | block_type=${block_type} key=${blockKey}`);
-      return { ok: true, document_id, appended: true, type };
-    }),
+      });
+    },
   );
 
   // ── wiki create node ───────────────────────────────────────────────────────

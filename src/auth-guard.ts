@@ -14,7 +14,7 @@ export const MODULE_SCOPES: Record<string, string[]> = {
   ],
   docs: [
     "docx:document:readonly", "docx:document:create",
-    "docx:document:write_only", "search:docs:read",
+    "docx:document:write_only", "docx:document.block:convert", "search:docs:read",
     "space:document:delete", "space:document:move",
     "space:document:retrieve", "drive:drive.metadata:readonly",
     "drive:file:download", "drive:file:upload",
