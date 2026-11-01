@@ -2,3 +2,15 @@
 command = "bash"
 args = ["-c", "exec node \"$(git rev-parse --show-toplevel)/dist/index.js\""]
 startup_timeout_sec = 20
+
+[mcp_servers.lark_bridge.tools.feishu_im_send]
+approval_mode = "approve"
+
+[mcp_servers.lark_bridge.tools.feishu_calendar_create]
+approval_mode = "approve"
+
+[mcp_servers.lark_bridge.tools.feishu_calendar_list]
+approval_mode = "approve"
+
+[mcp_servers.lark_bridge.tools.feishu_auth_issue_token]
+approval_mode = "approve"

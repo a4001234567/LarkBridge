@@ -10,6 +10,7 @@ import { registerCalendarTools } from "./tools/calendar.js";
 import { registerTaskTools } from "./tools/task.js";
 import { registerDocTools } from "./tools/docs.js";
 import { registerTokenProxyTools, closeTokenProxy } from "./tools/token-proxy.js";
+import { registerPrompts } from "./prompts.js";
 import { asUser, withAuth } from "./client.js";
 import { CodexNotifier } from "./codex-notifier.js";
 import { formatEvents } from "./format-events.js";
@@ -36,6 +37,7 @@ registerCalendarTools(server);
 registerTaskTools(server);
 registerDocTools(server);
 registerTokenProxyTools(server);
+registerPrompts(server);
 server.tool(
   "feishu_bridge_sessions",
   "List sessions and chat assignments.",

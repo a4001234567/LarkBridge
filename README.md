@@ -66,6 +66,10 @@ For fresh authorization, call `feishu_auth_init` with a module name (default `al
 
 The migrated people, calendar, task, and document tools use the broker's shared user token. When authorization or a recorded module scope is missing, a tool returns the verification URL from the broker's device flow; authorize and retry the tool. Tenant-token wiki operations remain available without user OAuth where Lark permits them.
 
+The original server's module `SKILL.md` guidance is included under `skills/feishu/` and exposed as MCP prompts (`lark-mcp-guide`, `feishu-calendar`, `feishu-task`, `feishu-people`, `feishu-im`, `feishu-interactive-cards`, `feishu-watch-loop`, and `feishu-doc`). The `feishu-watch-loop` prompt keeps the original name but describes broker delivery in place of the removed blocking receiver. Calendar and Task retain their original tool workflows; their guidance reflects broker-managed auth and current result shapes. Messaging keeps its send/read tools and documents the Bridge's compact inbound events separately. The Claude channel prompt is omitted because that receiver is not part of this server. `lark-tool-design` exposes the repository's tool-design skill through the same prompt mechanism.
+
+`AGENTS.md` gives Codex sessions opened in this repository the default Lark behavior: explicit chat subscriptions, broker-owned delivery and acknowledgment, and one coherent response to a burst of related messages.
+
 ## Session operation
 
 1. Call `feishu_bridge_sessions` to see registered sessions and filters.
